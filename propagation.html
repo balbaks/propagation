@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Propagation — Node Network</title>
+<style>
+  /* Full-bleed canvas, no scrollbars, black background so nodes glow */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+
+<!-- Import map lets the browser resolve bare "three" specifiers straight from a CDN — no bundler needed -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const NODE_COUNT = 500;
+const SPHERE_RADIUS = 16;      // radius of the volume nodes are scattered in
+const NODE_SIZE = 0.16;        // radius of each node sphere
+const MIN_NEIGHBORS = 3;
+const MAX_NEIGHBORS = 4;
+
+// ---------------------------------------------------------------------------
+// Renderer / scene / camera
+// ---------------------------------------------------------------------------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(
+  55, window.innerWidth / window.innerHeight, 0.1, 1000
+);
+// Pull the camera back far enough that the whole sphere volume fits in view
+const fitDistance = SPHERE_RADIUS / Math.sin((camera.fov * Math.PI / 180) / 2);
+camera.position.set(0, 0, fitDistance * 1.15);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+// OrbitControls: mouse-drag to rotate, wheel to zoom, right-drag to pan
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance = 5;
+controls.maxDistance = SPHERE_RADIUS * 6;
+controls.autoRotate = true;       // slow idle spin; user input still overrides it
+controls.autoRotateSpeed = 0.4;
+controls.target.set(0, 0, 0);
+
+// ---------------------------------------------------------------------------
+// Post-processing: bloom pass gives the nodes their "glowing" look
+// ---------------------------------------------------------------------------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  1.2,   // strength
+  0.5,   // radius
+  0.15   // threshold — only bright (emissive) pixels bloom
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+// ---------------------------------------------------------------------------
+// Generate node positions, uniformly distributed inside the sphere volume
+// ---------------------------------------------------------------------------
+function randomPointInSphere(radius) {
+  // Random direction via normalized gaussian-ish component sampling
+  const u = Math.random();
+  const v = Math.random();
+  const theta = 2 * Math.PI * u;
+  const phi = Math.acos(2 * v - 1);
+  // cbrt of a uniform random gives uniform density over the *volume*
+  // (sampling r linearly would bias points toward the center)
+  const r = radius * Math.cbrt(Math.random());
+
+  const x = r * Math.sin(phi) * Math.cos(theta);
+  const y = r * Math.sin(phi) * Math.sin(theta);
+  const z = r * Math.cos(phi);
+  return new THREE.Vector3(x, y, z);
+}
+
+const nodePositions = [];
+for (let i = 0; i < NODE_COUNT; i++) {
+  nodePositions.push(randomPointInSphere(SPHERE_RADIUS));
+}
+
+// ---------------------------------------------------------------------------
+// Nodes: one InstancedMesh of small glowing spheres (single draw call)
+// ---------------------------------------------------------------------------
+const nodeGeometry = new THREE.SphereGeometry(NODE_SIZE, 8, 8);
+const nodeMaterial = new THREE.MeshBasicMaterial({
+  color: 0xffffff,      // multiplied by per-instance color below
+  vertexColors: true
+});
+const nodeMesh = new THREE.InstancedMesh(nodeGeometry, nodeMaterial, NODE_COUNT);
+
+const dummy = new THREE.Object3D();
+const color = new THREE.Color();
+const nodeBaseColors = [];      // remembered so signal flashes can fade back to the real color
+for (let i = 0; i < NODE_COUNT; i++) {
+  const p = nodePositions[i];
+  dummy.position.copy(p);
+  dummy.updateMatrix();
+  nodeMesh.setMatrixAt(i, dummy.matrix);
+
+  // Hue shifts from cyan (center) to violet (edge) based on radial distance
+  const t = p.length() / SPHERE_RADIUS;
+  color.setHSL(0.55 - t * 0.2, 1.0, 0.55 + Math.random() * 0.15);
+  nodeMesh.setColorAt(i, color);
+  nodeBaseColors.push(color.clone());
+}
+nodeMesh.instanceMatrix.needsUpdate = true;
+nodeMesh.instanceColor.needsUpdate = true;
+scene.add(nodeMesh);
+
+// ---------------------------------------------------------------------------
+// Edges: connect each node to its 3-4 nearest neighbors
+// ---------------------------------------------------------------------------
+const edgeKeys = new Set();     // dedupe so a mutual pair only draws one line
+const linePositions = [];
+
+for (let i = 0; i < NODE_COUNT; i++) {
+  const distances = [];
+  for (let j = 0; j < NODE_COUNT; j++) {
+    if (i === j) continue;
+    distances.push({ j, distSq: nodePositions[i].distanceToSquared(nodePositions[j]) });
+  }
+  distances.sort((a, b) => a.distSq - b.distSq);
+
+  const neighborCount = MIN_NEIGHBORS + Math.floor(Math.random() * (MAX_NEIGHBORS - MIN_NEIGHBORS + 1));
+  for (let n = 0; n < neighborCount; n++) {
+    const j = distances[n].j;
+    const key = i < j ? `${i}_${j}` : `${j}_${i}`;
+    if (edgeKeys.has(key)) continue;
+    edgeKeys.add(key);
+
+    const a = nodePositions[i];
+    const b = nodePositions[j];
+    linePositions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  }
+}
+
+const edgeGeometry = new THREE.BufferGeometry();
+edgeGeometry.setAttribute(
+  'position',
+  new THREE.Float32BufferAttribute(linePositions, 3)
+);
+const edgeMaterial = new THREE.LineBasicMaterial({
+  color: 0x3a7bff,
+  transparent: true,
+  opacity: 0.25
+});
+const edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+scene.add(edges);
+
+// Adjacency list built from the deduped edge set — signal propagation uses this
+// to know which neighbors a node can forward a pulse to.
+const adjacency = Array.from({ length: NODE_COUNT }, () => []);
+for (const key of edgeKeys) {
+  const [i, j] = key.split('_').map(Number);
+  adjacency[i].push(j);
+  adjacency[j].push(i);
+}
+
+// ---------------------------------------------------------------------------
+// Signal propagation: pulses that travel along edges and fan out on arrival
+// ---------------------------------------------------------------------------
+const SIGNAL_SPEED = 1.5;        // progress units / second -> ~0.67s to cross an edge
+const MAX_GENERATIONS = 8;       // hop limit so a burst eventually dies out
+const MAX_ACTIVE_SIGNALS = 4000; // safety cap so a big fan-out can't tank the framerate
+const FLASH_DURATION = 0.3;      // seconds for a node's arrival flash to fade out
+const WHITE = new THREE.Color(0xffffff);
+
+let activeSignals = []; // each: { source, target, progress, strength, color, generation }
+
+// Signals render as one small InstancedMesh sized to the worst-case pool;
+// each frame we only draw as many instances as there are currently active signals.
+const signalGeometry = new THREE.SphereGeometry(NODE_SIZE * 0.9, 6, 6);
+const signalMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
+const signalMesh = new THREE.InstancedMesh(signalGeometry, signalMaterial, MAX_ACTIVE_SIGNALS);
+signalMesh.count = 0;
+scene.add(signalMesh);
+
+const signalDummy = new THREE.Object3D();
+const signalColor = new THREE.Color();
+
+// Per-node flash state: seconds of fade-out remaining, plus which nodes are active
+// (so updateFlashes only touches nodes that actually need a color update each frame)
+const nodeFlashRemaining = new Float32Array(NODE_COUNT);
+const flashedNodes = new Set();
+
+function spawnSignal(source, target, generation) {
+  if (activeSignals.length >= MAX_ACTIVE_SIGNALS) return; // drop if the pool is full
+  activeSignals.push({
+    source,
+    target,
+    progress: 0,
+    strength: 1.0,
+    color: nodeBaseColors[source].clone(),
+    generation
+  });
+}
+
+// Starts a fresh pulse from a random node toward one of its random neighbors
+function injectRandomSignal() {
+  const start = Math.floor(Math.random() * NODE_COUNT);
+  const neighbors = adjacency[start];
+  if (neighbors.length === 0) return;
+  const target = neighbors[Math.floor(Math.random() * neighbors.length)];
+  spawnSignal(start, target, 0);
+}
+
+function triggerFlash(nodeIndex) {
+  nodeFlashRemaining[nodeIndex] = FLASH_DURATION;
+  flashedNodes.add(nodeIndex);
+}
+
+// Advances every signal's progress, resolves arrivals (flash + forward to
+// neighbors, excluding the one it came from), and updates the signal InstancedMesh.
+// Note: there's no "visited" tracking yet, so a wavefront can revisit a node it
+// already passed through — that's expected for now (see MAX_GENERATIONS comment above).
+function updateSignals(dt) {
+  const next = [];
+  for (const s of activeSignals) {
+    s.progress += SIGNAL_SPEED * dt;
+
+    if (s.progress >= 1) {
+      triggerFlash(s.target);
+
+      if (s.generation < MAX_GENERATIONS) {
+        for (const neighbor of adjacency[s.target]) {
+          if (neighbor === s.source) continue; // don't bounce straight back
+          spawnSignal(s.target, neighbor, s.generation + 1);
+        }
+      }
+      // signal is consumed on arrival — not carried into `next`
+    } else {
+      next.push(s);
+    }
+  }
+  activeSignals = next;
+
+  // Position/color each surviving signal along its edge (source -> target)
+  signalMesh.count = activeSignals.length;
+  for (let i = 0; i < activeSignals.length; i++) {
+    const s = activeSignals[i];
+    const a = nodePositions[s.source];
+    const b = nodePositions[s.target];
+    signalDummy.position.lerpVectors(a, b, s.progress);
+    signalDummy.updateMatrix();
+    signalMesh.setMatrixAt(i, signalDummy.matrix);
+
+    // Push well past 1.0 so bloom's threshold picks the pulse out clearly
+    signalColor.copy(s.color).multiplyScalar(2.2 * s.strength);
+    signalMesh.setColorAt(i, signalColor);
+  }
+  signalMesh.instanceMatrix.needsUpdate = true;
+  if (signalMesh.instanceColor) signalMesh.instanceColor.needsUpdate = true;
+}
+
+// Fades each flashed node's instance color back down to its base color over FLASH_DURATION
+function updateFlashes(dt) {
+  if (flashedNodes.size === 0) return;
+  for (const i of flashedNodes) {
+    nodeFlashRemaining[i] -= dt;
+    const t = Math.max(nodeFlashRemaining[i] / FLASH_DURATION, 0);
+
+    if (t <= 0) {
+      nodeMesh.setColorAt(i, nodeBaseColors[i]);
+      flashedNodes.delete(i);
+    } else {
+      // Brighten toward white, proportional to remaining flash time
+      color.copy(nodeBaseColors[i]).lerp(WHITE, t * 0.85).multiplyScalar(1 + t);
+      nodeMesh.setColorAt(i, color);
+    }
+  }
+  nodeMesh.instanceColor.needsUpdate = true;
+}
+
+// Seed the graph with one starting pulse; spacebar injects fresh bursts on demand
+injectRandomSignal();
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    injectRandomSignal();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Resize handling
+// ---------------------------------------------------------------------------
+window.addEventListener('resize', () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloomPass.resolution.set(w, h);
+});
+
+// ---------------------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------------------
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+
+  updateSignals(dt);
+  updateFlashes(dt);
+
+  controls.update();       // needed for damping + autoRotate
+  composer.render();
+}
+animate();
+</script>
+</body>
+</html>
