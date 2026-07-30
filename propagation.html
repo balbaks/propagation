@@ -7,9 +7,119 @@
   /* Full-bleed canvas, no scrollbars, black background so nodes glow */
   html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
   canvas { display: block; }
+
+  /* Instrument-panel overlays. pointer-events:none on the panel itself lets a
+     mouse-drag that merely passes over the panel's padding/background still
+     rotate the 3D view underneath; only the actual controls re-enable it. */
+  .panel {
+    position: fixed;
+    top: 12px;
+    background: rgba(10, 14, 20, 0.72);
+    color: #e6f0ff;
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 12px 14px;
+    border-radius: 10px;
+    z-index: 10;
+    pointer-events: none;
+    user-select: none;
+  }
+  .panel h3 {
+    margin: 0 0 10px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8fb4ff;
+    font-weight: 600;
+  }
+  #controls-panel { left: 12px; width: 220px; }
+  #stats-panel { right: 12px; text-align: right; }
+
+  .slider-row { margin-bottom: 10px; }
+  .slider-row .row-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #b8c6da;
+    margin-bottom: 3px;
+  }
+  .slider-row .row-label span:last-child { color: #7cffb2; font-variant-numeric: tabular-nums; }
+  .panel input[type="range"] {
+    width: 100%;
+    pointer-events: auto;
+    accent-color: #3a9bff;
+  }
+  .buttons-row { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .panel button {
+    flex: 1;
+    background: #1b2636;
+    border: 1px solid #2e3f57;
+    color: #dce8ff;
+    padding: 6px 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+    pointer-events: auto;
+  }
+  .panel button:hover { background: #243149; }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    font-size: 11px;
+    color: #b8c6da;
+  }
+  .panel input[type="checkbox"] { pointer-events: auto; }
+  #stats-panel div { margin-bottom: 4px; }
+  #stats-panel span { color: #7cffb2; font-weight: 600; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
+
+<!-- Control panel: sliders bound live to the firing constants, plus transport buttons -->
+<div id="controls-panel" class="panel">
+  <h3>Controls</h3>
+
+  <div class="slider-row">
+    <div class="row-label"><span>Signal speed</span><span id="val-speed"></span></div>
+    <input type="range" id="slider-speed" min="0.2" max="5" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Signal strength</span><span id="val-strength"></span></div>
+    <input type="range" id="slider-strength" min="0.1" max="1.5" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Base threshold</span><span id="val-threshold"></span></div>
+    <input type="range" id="slider-threshold" min="0.5" max="2.5" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Decay rate</span><span id="val-decay"></span></div>
+    <input type="range" id="slider-decay" min="0.1" max="3" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Refractory time</span><span id="val-refractory"></span></div>
+    <input type="range" id="slider-refractory" min="0.1" max="1.5" step="0.01">
+  </div>
+
+  <div class="buttons-row">
+    <button id="btn-pause">Pause</button>
+    <button id="btn-reset">Reset</button>
+    <button id="btn-burst">Random Burst</button>
+  </div>
+
+  <label class="checkbox-row">
+    <input type="checkbox" id="chk-autorotate">
+    <span>Auto-rotate</span>
+  </label>
+</div>
+
+<!-- Stats overlay: live readout of firing activity -->
+<div id="stats-panel" class="panel">
+  <h3>Stats</h3>
+  <div>Firing rate: <span id="stat-firing">0</span>/s</div>
+  <div>Active signals: <span id="stat-signals">0</span></div>
+  <div>Active nodes: <span id="stat-nodes">0</span></div>
+</div>
 
 <!-- Import map lets the browser resolve bare "three" specifiers straight from a CDN — no bundler needed -->
 <script type="importmap">
@@ -191,15 +301,18 @@ for (const key of edgeKeys) {
 }
 
 // ---------------------------------------------------------------------------
-// Neuron-like firing: tunable constants (adjust these to change the rhythm)
+// Neuron-like firing: tunable constants (adjust these to change the rhythm).
+// The five marked "live" are `let`, not `const` — the control panel further
+// down rebinds them directly, and every reader picks up the new value on its
+// next read since they all live in this same module scope.
 // ---------------------------------------------------------------------------
-const SIGNAL_SPEED = 1.5;         // progress units / second -> ~0.67s to cross an edge
-const SIGNAL_STRENGTH = 0.55;     // activation deposited into a node per incoming signal
+let SIGNAL_SPEED = 1.5;           // live — progress units / second -> ~0.67s to cross an edge
+let SIGNAL_STRENGTH = 0.55;       // live — activation deposited into a node per incoming signal
 const CLICK_STRENGTH = 2.0;       // activation added by a manual click injection (always fires)
-const BASE_THRESHOLD = 1.0;       // activation level a node must cross to fire
+let BASE_THRESHOLD = 1.0;         // live — activation level a node must cross to fire
 const THRESHOLD_JITTER = 0.25;    // +/- random spread per node so they don't fire in lockstep
-const DECAY_RATE = 1.1;           // leaky-integration decay rate; higher drains charge faster
-const REFRACTORY_TIME = 0.5;      // seconds a node ignores input / can't re-fire after firing
+let DECAY_RATE = 1.1;             // live — leaky-integration decay rate; higher drains charge faster
+let REFRACTORY_TIME = 0.5;        // live — seconds a node ignores input / can't re-fire after firing
 const FLASH_DURATION = 0.3;       // seconds for the white "just fired" flash to fade out
 const MAX_ACTIVE_SIGNALS = 6000;  // safety cap — refractory periods keep real traffic well under this
 const WHITE = new THREE.Color(0xffffff);
@@ -209,10 +322,20 @@ const WHITE = new THREE.Color(0xffffff);
 // ---------------------------------------------------------------------------
 const activation = new Float32Array(NODE_COUNT);         // current charge; decays toward 0
 const threshold = new Float32Array(NODE_COUNT);          // fires once activation crosses this
+const thresholdJitter = new Float32Array(NODE_COUNT);    // each node's fixed +/- offset from BASE_THRESHOLD
 const refractoryTimer = new Float32Array(NODE_COUNT);    // >0 => refractory; 0 => resting
 const fireFlashRemaining = new Float32Array(NODE_COUNT); // >0 => mid white "just fired" flash
 for (let i = 0; i < NODE_COUNT; i++) {
-  threshold[i] = BASE_THRESHOLD + (Math.random() - 0.5) * THRESHOLD_JITTER;
+  thresholdJitter[i] = (Math.random() - 0.5) * THRESHOLD_JITTER;
+  threshold[i] = BASE_THRESHOLD + thresholdJitter[i];
+}
+
+// Re-applies BASE_THRESHOLD to every node while preserving each node's own
+// jitter offset — called whenever the "Base threshold" slider moves.
+function applyBaseThreshold() {
+  for (let i = 0; i < NODE_COUNT; i++) {
+    threshold[i] = BASE_THRESHOLD + thresholdJitter[i];
+  }
 }
 
 let activeSignals = []; // each: { source, target, progress, strength, color }
@@ -293,7 +416,7 @@ function updateSignals(dt) {
 // neighbors" rule: a node only re-broadcasts once its own accumulated charge crosses
 // its threshold, and it can't fire again until its refractory window elapses — that
 // combination is what naturally caps runaway spreading instead of a hop counter.
-function updateNodes(dt) {
+function updateNodes(dt, now) {
   for (let i = 0; i < NODE_COUNT; i++) {
     if (refractoryTimer[i] > 0) refractoryTimer[i] -= dt;
     if (fireFlashRemaining[i] > 0) fireFlashRemaining[i] -= dt;
@@ -309,6 +432,7 @@ function updateNodes(dt) {
       activation[i] = 0;
       refractoryTimer[i] = REFRACTORY_TIME;
       fireFlashRemaining[i] = FLASH_DURATION;
+      fireTimestamps.push(now); // feeds the "firing rate" stat
     }
 
     // Brightness = base color scaled by activation ratio, plus a white flash on fire
@@ -364,6 +488,92 @@ window.addEventListener('click', (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Control panel: binds each slider straight to its matching `let` constant
+// above, plus transport buttons and the auto-rotate checkbox.
+// ---------------------------------------------------------------------------
+let paused = false; // Pause freezes updateSignals/updateNodes; rendering + OrbitControls keep running
+
+// Wires a <input type=range> to a getter/setter pair and its value readout span
+function bindSlider(inputId, valueId, get, set, decimals) {
+  const input = document.getElementById(inputId);
+  const valueEl = document.getElementById(valueId);
+  input.value = get();
+  valueEl.textContent = get().toFixed(decimals);
+  input.addEventListener('input', () => {
+    const v = parseFloat(input.value);
+    set(v);
+    valueEl.textContent = v.toFixed(decimals);
+  });
+}
+
+bindSlider('slider-speed', 'val-speed', () => SIGNAL_SPEED, (v) => { SIGNAL_SPEED = v; }, 2);
+bindSlider('slider-strength', 'val-strength', () => SIGNAL_STRENGTH, (v) => { SIGNAL_STRENGTH = v; }, 2);
+bindSlider('slider-decay', 'val-decay', () => DECAY_RATE, (v) => { DECAY_RATE = v; }, 2);
+bindSlider('slider-refractory', 'val-refractory', () => REFRACTORY_TIME, (v) => { REFRACTORY_TIME = v; }, 2);
+// Threshold needs the extra step of re-applying to every node's stored threshold
+bindSlider('slider-threshold', 'val-threshold', () => BASE_THRESHOLD, (v) => {
+  BASE_THRESHOLD = v;
+  applyBaseThreshold();
+}, 2);
+
+// Clears activation/refractory/flash state and any in-transit signals, then
+// immediately repaints every node back to its dim resting color.
+function resetSimulation() {
+  activation.fill(0);
+  refractoryTimer.fill(0);
+  fireFlashRemaining.fill(0);
+  activeSignals = [];
+  signalMesh.count = 0;
+  fireTimestamps.length = 0;
+
+  for (let i = 0; i < NODE_COUNT; i++) {
+    color.copy(nodeBaseColors[i]).multiplyScalar(0.4); // ratio=0 resting brightness, see updateNodes
+    nodeMesh.setColorAt(i, color);
+  }
+  nodeMesh.instanceColor.needsUpdate = true;
+}
+
+const btnPause = document.getElementById('btn-pause');
+btnPause.addEventListener('click', () => {
+  paused = !paused;
+  btnPause.textContent = paused ? 'Resume' : 'Pause';
+});
+document.getElementById('btn-reset').addEventListener('click', resetSimulation);
+document.getElementById('btn-burst').addEventListener('click', injectRandomSignal);
+
+const chkAutoRotate = document.getElementById('chk-autorotate');
+chkAutoRotate.checked = controls.autoRotate;
+chkAutoRotate.addEventListener('change', () => { controls.autoRotate = chkAutoRotate.checked; });
+
+// ---------------------------------------------------------------------------
+// Stats overlay: firing rate (fires/sec, ~1s trailing window), active signal
+// count, and count of nodes charged above 10% of their own threshold.
+// Refreshed 4x/second so the numbers read cleanly instead of flickering.
+// ---------------------------------------------------------------------------
+let fireTimestamps = [];   // elapsed-time stamp of every fire event in roughly the last second
+let statsTimer = 0;
+const STATS_INTERVAL = 0.25;
+
+const statFiringEl = document.getElementById('stat-firing');
+const statSignalsEl = document.getElementById('stat-signals');
+const statNodesEl = document.getElementById('stat-nodes');
+
+function updateStatsDisplay(now) {
+  while (fireTimestamps.length > 0 && fireTimestamps[0] < now - 1.0) {
+    fireTimestamps.shift();
+  }
+
+  let activeNodeCount = 0;
+  for (let i = 0; i < NODE_COUNT; i++) {
+    if (activation[i] > 0.1 * threshold[i]) activeNodeCount++;
+  }
+
+  statFiringEl.textContent = fireTimestamps.length;
+  statSignalsEl.textContent = activeSignals.length;
+  statNodesEl.textContent = activeNodeCount;
+}
+
+// ---------------------------------------------------------------------------
 // Resize handling
 // ---------------------------------------------------------------------------
 window.addEventListener('resize', () => {
@@ -384,9 +594,18 @@ const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
+  const now = clock.elapsedTime;
 
-  updateSignals(dt);
-  updateNodes(dt);
+  if (!paused) {
+    updateSignals(dt);
+    updateNodes(dt, now);
+  }
+
+  statsTimer += dt;
+  if (statsTimer >= STATS_INTERVAL) {
+    statsTimer -= STATS_INTERVAL;
+    updateStatsDisplay(now);
+  }
 
   controls.update();       // needed for damping + autoRotate
   composer.render();
