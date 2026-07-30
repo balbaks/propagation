@@ -63,8 +63,9 @@ document.body.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
-controls.minDistance = 5;
-controls.maxDistance = SPHERE_RADIUS * 6;
+controls.zoomSpeed = 0.3;                    // gentler wheel zoom (VM scroll deltas can be huge)
+controls.minDistance = SPHERE_RADIUS * 0.6;
+controls.maxDistance = SPHERE_RADIUS * 4;
 controls.autoRotate = true;       // slow idle spin; user input still overrides it
 controls.autoRotateSpeed = 0.4;
 controls.target.set(0, 0, 0);
@@ -111,9 +112,13 @@ for (let i = 0; i < NODE_COUNT; i++) {
 // Nodes: one InstancedMesh of small glowing spheres (single draw call)
 // ---------------------------------------------------------------------------
 const nodeGeometry = new THREE.SphereGeometry(NODE_SIZE, 8, 8);
+// NOTE: vertexColors is intentionally NOT set here. InstancedMesh per-instance
+// color (via setColorAt/instanceColor) is wired up automatically regardless of
+// that flag; turning it on actually breaks rendering, because it also makes the
+// vertex shader require a per-vertex `color` geometry attribute we never provide,
+// which defaults to (0,0,0,1) and zeroes the instance color out entirely (black).
 const nodeMaterial = new THREE.MeshBasicMaterial({
-  color: 0xffffff,      // multiplied by per-instance color below
-  vertexColors: true
+  color: 0xffffff       // multiplied by per-instance color below
 });
 const nodeMesh = new THREE.InstancedMesh(nodeGeometry, nodeMaterial, NODE_COUNT);
 
@@ -215,7 +220,7 @@ let activeSignals = []; // each: { source, target, progress, strength, color }
 // Signals render as one small InstancedMesh sized to a worst-case pool;
 // each frame we only draw as many instances as there are currently active signals.
 const signalGeometry = new THREE.SphereGeometry(NODE_SIZE * 0.9, 6, 6);
-const signalMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
+const signalMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff }); // see nodeMaterial note above re: vertexColors
 const signalMesh = new THREE.InstancedMesh(signalGeometry, signalMaterial, MAX_ACTIVE_SIGNALS);
 signalMesh.count = 0;
 scene.add(signalMesh);
