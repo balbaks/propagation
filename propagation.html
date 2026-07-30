@@ -31,6 +31,14 @@
     color: #8fb4ff;
     font-weight: 600;
   }
+  .panel .subheading {
+    margin: 14px 0 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8fb4ff;
+    font-weight: 600;
+  }
   #controls-panel { left: 12px; width: 220px; }
   #stats-panel { right: 12px; text-align: right; }
 
@@ -110,6 +118,20 @@
   <label class="checkbox-row">
     <input type="checkbox" id="chk-autorotate">
     <span>Auto-rotate</span>
+  </label>
+
+  <div class="subheading">Plasticity</div>
+  <div class="slider-row">
+    <div class="row-label"><span>Learn rate</span><span id="val-learnrate"></span></div>
+    <input type="range" id="slider-learnrate" min="0" max="0.2" step="0.001">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Decay / sec</span><span id="val-decaypersec"></span></div>
+    <input type="range" id="slider-decaypersec" min="0" max="0.5" step="0.005">
+  </div>
+  <label class="checkbox-row">
+    <input type="checkbox" id="chk-plasticity">
+    <span>Plasticity ON/OFF</span>
   </label>
 </div>
 
@@ -254,8 +276,10 @@ scene.add(nodeMesh);
 // ---------------------------------------------------------------------------
 // Edges: connect each node to its 3-4 nearest neighbors
 // ---------------------------------------------------------------------------
-const edgeKeys = new Set();     // dedupe so a mutual pair only draws one line
+const edgeKeys = new Set();       // dedupe so a mutual pair only draws one line
 const linePositions = [];
+const edgeList = [];              // edgeList[e] = [i, j]; e also indexes edgeWeights and the color buffer below
+const edgeIndexByKey = new Map(); // "i_j" -> e, so the adjacency pass further down can look up each edge's index
 
 for (let i = 0; i < NODE_COUNT; i++) {
   const distances = [];
@@ -271,6 +295,8 @@ for (let i = 0; i < NODE_COUNT; i++) {
     const key = i < j ? `${i}_${j}` : `${j}_${i}`;
     if (edgeKeys.has(key)) continue;
     edgeKeys.add(key);
+    edgeIndexByKey.set(key, edgeList.length);
+    edgeList.push([i, j]);
 
     const a = nodePositions[i];
     const b = nodePositions[j];
@@ -278,26 +304,51 @@ for (let i = 0; i < NODE_COUNT; i++) {
   }
 }
 
+// Hebbian edge weights: one float per edge, all starting neutral at 1.0. edgeList's
+// index is shared with edgeWeights and with the per-vertex color buffer below, so
+// strengthening/decaying a weight and repainting its line are both simple index lookups.
+const edgeWeights = new Float32Array(edgeList.length).fill(1.0);
+
+const EDGE_BASE_COLOR = new THREE.Color(0x3a7bff);
+const edgeColorArray = new Float32Array(edgeList.length * 6); // 2 vertices * rgb per edge
+
 const edgeGeometry = new THREE.BufferGeometry();
 edgeGeometry.setAttribute(
   'position',
   new THREE.Float32BufferAttribute(linePositions, 3)
 );
+edgeGeometry.setAttribute(
+  'color',
+  new THREE.Float32BufferAttribute(edgeColorArray, 3)
+);
+const edgeColorAttr = edgeGeometry.attributes.color;
+
+// vertexColors lets each edge carry its own brightness (see updateEdgeWeights below)
+// instead of the single flat color/opacity this line material used before plasticity.
+// This is plain per-vertex geometry color on a real `color` attribute, which is the
+// case vertexColors is actually meant for — unlike the InstancedMesh nodes/signals
+// above, there's no missing-attribute trap here.
 const edgeMaterial = new THREE.LineBasicMaterial({
-  color: 0x3a7bff,
+  vertexColors: true,
   transparent: true,
-  opacity: 0.25
+  opacity: 0.9
 });
 const edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
 scene.add(edges);
 
 // Adjacency list built from the deduped edge set — signal propagation uses this
-// to know which neighbors a node can forward a pulse to.
+// to know which neighbors a node can forward a pulse to. adjacencyEdge mirrors it
+// 1:1, giving the edge index for adjacency[i][k], so a spawned signal can remember
+// which edge it's traveling on (needed to strengthen/read that edge's weight).
 const adjacency = Array.from({ length: NODE_COUNT }, () => []);
+const adjacencyEdge = Array.from({ length: NODE_COUNT }, () => []);
 for (const key of edgeKeys) {
   const [i, j] = key.split('_').map(Number);
+  const e = edgeIndexByKey.get(key);
   adjacency[i].push(j);
+  adjacencyEdge[i].push(e);
   adjacency[j].push(i);
+  adjacencyEdge[j].push(e);
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +368,14 @@ const FLASH_DURATION = 0.3;       // seconds for the white "just fired" flash to
 const MAX_ACTIVE_SIGNALS = 6000;  // safety cap — refractory periods keep real traffic well under this
 const WHITE = new THREE.Color(0xffffff);
 
+// --- Hebbian plasticity: edges strengthen with use, decay when idle ---------
+let LEARN_RATE = 0.04;        // live — weight gained by an edge that helped cause a fire
+let DECAY_PER_SEC = 0.02;     // live — weight lost per second by every edge (paused by the checkbox below)
+const WEIGHT_MIN = 0.2;       // floor a decayed, unused edge settles at
+const WEIGHT_MAX = 3.0;       // ceiling a well-used edge saturates at
+let plasticityEnabled = true; // live — when false, weights freeze: no strengthening, no decay
+const CONTRIBUTION_WINDOW = 0.2; // seconds an arrival stays "recent" enough to get credit if its target then fires
+
 // ---------------------------------------------------------------------------
 // Per-node neuron state
 // ---------------------------------------------------------------------------
@@ -325,6 +384,12 @@ const threshold = new Float32Array(NODE_COUNT);          // fires once activatio
 const thresholdJitter = new Float32Array(NODE_COUNT);    // each node's fixed +/- offset from BASE_THRESHOLD
 const refractoryTimer = new Float32Array(NODE_COUNT);    // >0 => refractory; 0 => resting
 const fireFlashRemaining = new Float32Array(NODE_COUNT); // >0 => mid white "just fired" flash
+
+// Per-node log of recent incoming-edge arrivals, e.g. [{ edgeIndex, time }, ...].
+// When a node fires, whichever of these are still within CONTRIBUTION_WINDOW get
+// their edge's weight bumped — this is the credit-assignment half of Hebbian learning.
+const recentContribs = Array.from({ length: NODE_COUNT }, () => []);
+
 for (let i = 0; i < NODE_COUNT; i++) {
   thresholdJitter[i] = (Math.random() - 0.5) * THRESHOLD_JITTER;
   threshold[i] = BASE_THRESHOLD + thresholdJitter[i];
@@ -351,13 +416,14 @@ scene.add(signalMesh);
 const signalDummy = new THREE.Object3D();
 const signalColor = new THREE.Color();
 
-function spawnSignal(source, target, strength) {
+function spawnSignal(source, target, strength, edgeIndex) {
   if (activeSignals.length >= MAX_ACTIVE_SIGNALS) return; // drop if the pool is full
   activeSignals.push({
     source,
     target,
     progress: 0,
     strength,
+    edgeIndex, // which edge this signal travels on — read for weight-modulated speed/strength, and for credit on arrival
     color: nodeBaseColors[source].clone()
   });
 }
@@ -367,23 +433,34 @@ function injectRandomSignal() {
   const start = Math.floor(Math.random() * NODE_COUNT);
   const neighbors = adjacency[start];
   if (neighbors.length === 0) return;
-  const target = neighbors[Math.floor(Math.random() * neighbors.length)];
-  spawnSignal(start, target, SIGNAL_STRENGTH);
+  const k = Math.floor(Math.random() * neighbors.length);
+  spawnSignal(start, neighbors[k], SIGNAL_STRENGTH, adjacencyEdge[start][k]);
 }
 
 // Advances every signal's progress and resolves arrivals. Arriving no longer
 // forwards blindly to neighbors — it just deposits charge into the target node's
 // activation. Whether that charge causes a fire (and a re-broadcast) is decided
 // per-node in updateNodes() below, based on that node's own threshold/refractory state.
-function updateSignals(dt) {
+function updateSignals(dt, now) {
   const next = [];
   for (const s of activeSignals) {
-    s.progress += SIGNAL_SPEED * dt;
+    // A well-used (high-weight) edge carries its signal a bit faster and, on
+    // arrival, deposits a bit more charge — the "self-reinforcing" half of
+    // Hebbian plasticity. wNorm is the edge's weight rescaled to 0..1.
+    const wNorm = (edgeWeights[s.edgeIndex] - WEIGHT_MIN) / (WEIGHT_MAX - WEIGHT_MIN);
+    const speedFactor = 0.75 + 0.35 * wNorm; // 0.75x at WEIGHT_MIN, 1.10x at WEIGHT_MAX
+    s.progress += SIGNAL_SPEED * speedFactor * dt;
 
     if (s.progress >= 1) {
       // A refractory node ignores incoming charge entirely
       if (refractoryTimer[s.target] <= 0) {
-        activation[s.target] += s.strength;
+        const strengthFactor = 0.7 + 0.6 * wNorm; // 0.7x at WEIGHT_MIN, 1.3x at WEIGHT_MAX
+        activation[s.target] += s.strength * strengthFactor;
+
+        // Log this arrival so a fire within CONTRIBUTION_WINDOW can credit this edge
+        const contribs = recentContribs[s.target].filter((c) => now - c.time <= CONTRIBUTION_WINDOW);
+        contribs.push({ edgeIndex: s.edgeIndex, time: now });
+        recentContribs[s.target] = contribs;
       }
       // signal is consumed on arrival either way — not carried into `next`
     } else {
@@ -426,9 +503,21 @@ function updateNodes(dt, now) {
 
     // Fire when charge crosses threshold and the node isn't still refractory
     if (activation[i] >= threshold[i] && refractoryTimer[i] <= 0) {
-      for (const neighbor of adjacency[i]) {
-        spawnSignal(i, neighbor, SIGNAL_STRENGTH);
+      for (let k = 0; k < adjacency[i].length; k++) {
+        spawnSignal(i, adjacency[i][k], SIGNAL_STRENGTH, adjacencyEdge[i][k]);
       }
+
+      // Hebbian strengthening: any edge that deposited charge into this node
+      // recently enough shares credit for the fire it just helped cause.
+      if (plasticityEnabled) {
+        for (const c of recentContribs[i]) {
+          if (now - c.time <= CONTRIBUTION_WINDOW) {
+            edgeWeights[c.edgeIndex] = Math.min(WEIGHT_MAX, edgeWeights[c.edgeIndex] + LEARN_RATE);
+          }
+        }
+      }
+      recentContribs[i].length = 0; // consumed — start collecting fresh credit for the next fire
+
       activation[i] = 0;
       refractoryTimer[i] = REFRACTORY_TIME;
       fireFlashRemaining[i] = FLASH_DURATION;
@@ -445,6 +534,31 @@ function updateNodes(dt, now) {
     nodeMesh.setColorAt(i, color);
   }
   nodeMesh.instanceColor.needsUpdate = true;
+}
+
+// Per-frame edge-weight maintenance: continuous decay toward WEIGHT_MIN (skipped
+// when plasticity is off, which freezes weights entirely), then repaint every
+// edge's line color from its current weight. This is the visible payoff of
+// plasticity — well-used pathways stay bright while dormant ones fade, so
+// distinct routes emerge from the graph over time instead of a uniform mesh.
+function updateEdgeWeights(dt) {
+  const arr = edgeColorAttr.array;
+  for (let e = 0; e < edgeList.length; e++) {
+    if (plasticityEnabled) {
+      edgeWeights[e] = Math.max(WEIGHT_MIN, edgeWeights[e] - DECAY_PER_SEC * dt);
+    }
+
+    const wNorm = (edgeWeights[e] - WEIGHT_MIN) / (WEIGHT_MAX - WEIGHT_MIN);
+    const brightness = 0.1 + 1.9 * wNorm; // near-invisible at WEIGHT_MIN, bloom-bright at WEIGHT_MAX
+    const i6 = e * 6;
+    arr[i6] = EDGE_BASE_COLOR.r * brightness;
+    arr[i6 + 1] = EDGE_BASE_COLOR.g * brightness;
+    arr[i6 + 2] = EDGE_BASE_COLOR.b * brightness;
+    arr[i6 + 3] = arr[i6];
+    arr[i6 + 4] = arr[i6 + 1];
+    arr[i6 + 5] = arr[i6 + 2];
+  }
+  edgeColorAttr.needsUpdate = true;
 }
 
 // --- Injection: keyboard + mouse click --------------------------------------
@@ -545,6 +659,14 @@ const chkAutoRotate = document.getElementById('chk-autorotate');
 chkAutoRotate.checked = controls.autoRotate;
 chkAutoRotate.addEventListener('change', () => { controls.autoRotate = chkAutoRotate.checked; });
 
+// Plasticity controls
+bindSlider('slider-learnrate', 'val-learnrate', () => LEARN_RATE, (v) => { LEARN_RATE = v; }, 3);
+bindSlider('slider-decaypersec', 'val-decaypersec', () => DECAY_PER_SEC, (v) => { DECAY_PER_SEC = v; }, 3);
+
+const chkPlasticity = document.getElementById('chk-plasticity');
+chkPlasticity.checked = plasticityEnabled;
+chkPlasticity.addEventListener('change', () => { plasticityEnabled = chkPlasticity.checked; });
+
 // ---------------------------------------------------------------------------
 // Stats overlay: firing rate (fires/sec, ~1s trailing window), active signal
 // count, and count of nodes charged above 10% of their own threshold.
@@ -597,8 +719,9 @@ function animate() {
   const now = clock.elapsedTime;
 
   if (!paused) {
-    updateSignals(dt);
+    updateSignals(dt, now);
     updateNodes(dt, now);
+    updateEdgeWeights(dt);
   }
 
   statsTimer += dt;
