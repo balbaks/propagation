@@ -325,8 +325,12 @@ const signalMaterial = new THREE.MeshBasicMaterial({
 const signalDummy = new THREE.Object3D();
 const signalColor = new THREE.Color();
 
-const TRAIL_FRACTION = 0.22;    // trail length as a fraction of the edge it's crossing
-const SIGNAL_BRIGHTNESS = 2.2;  // pushes signal color well past 1.0 so bloom picks it out hard
+// Signals are the star of the show: long, bright, chunky comets that dominate
+// over the now much-dimmer resting network (see node/edge brightness tuning
+// further down) — this contrast is the whole point of the "electric" look.
+const TRAIL_FRACTION = 0.45;    // trail length as a fraction of the edge it's crossing (was 0.22)
+const SIGNAL_BRIGHTNESS = 5.0;  // pushes signal color well past 1.0 so bloom picks it out hard (was 2.2)
+const SIGNAL_HEAD_SCALE = 1.5;  // head radius multiplier vs. node size (was implicitly 0.9)
 
 // Hot travel gradient: cyan (just fired) -> magenta (mid-flight) -> white (about to arrive)
 const GRADIENT_A = new THREE.Color(0x00ffff);
@@ -428,13 +432,36 @@ function computeEdges(positions, nodeCount) {
 // `const` — the control panel further down rebinds them directly.
 // ---------------------------------------------------------------------------
 let SIGNAL_SPEED = 1.5;           // live — progress units / second -> ~0.67s to cross an edge
-let SIGNAL_STRENGTH = 0.55;       // live — activation deposited into a node per incoming signal
+// NOTE on these two: this cascade model has a sharp critical point (classic
+// branching-process behavior). Testing (60-90s simulated soak tests) found
+// two failure modes: (1) combos that reliably chain-react run away to ~55-60%
+// of the ENTIRE network firing simultaneously, permanently — worse than the
+// original "too calm" problem; (2) even combos where a SINGLE signal safely
+// never cascades can still slowly leak upward forever, because a burst that
+// fires many nearby nodes at once causes CONVERGENT summation — two signals
+// landing on the same shared downstream neighbor add together, crossing
+// threshold even though neither would have alone. A single 0.55-strength
+// signal against a 1.0 threshold has enough margin that even 2x convergence
+// mostly doesn't cross it. Keep this margin: don't push these values further
+// without re-running the soak test in the `run` skill or similar.
+let SIGNAL_STRENGTH = 0.6;        // live — activation deposited into a node per incoming signal (was 0.55 — a small, safe nudge)
 const CLICK_STRENGTH = 2.0;       // activation added by a manual click injection (always fires)
-let BASE_THRESHOLD = 1.0;         // live — activation level a node must cross to fire
+let BASE_THRESHOLD = 1.0;         // live — activation level a node must cross to fire (kept at the original value — see note above)
 const THRESHOLD_JITTER = 0.25;    // +/- random spread per node so they don't fire in lockstep
 let DECAY_RATE = 1.1;             // live — leaky-integration decay rate; higher drains charge faster
 let REFRACTORY_TIME = 0.5;        // live — seconds a node ignores input / can't re-fire after firing
 const FLASH_DURATION = 0.3;       // seconds for the white "just fired" flash to fade out
+
+// --- Brightness contrast: dark idle network, brilliant active one -----------
+// The network should read as mostly DARK at rest, lighting up sharply only
+// where signals travel and nodes fire — these stay well under the bloom
+// threshold (0.22) at rest so thousands of idle nodes/edges don't wash the
+// scene into a uniform glow (that washout was the exact problem being fixed).
+const NODE_RESTING_BRIGHTNESS = 0.045; // was 0.14 — much darker at rest
+const NODE_CHARGE_RAMP = 1.0;          // brightness added as activation approaches threshold (was 1.3)
+const FLASH_WHITE_LERP = 0.98;         // was 0.95 — firing flash goes almost pure white
+const FLASH_BRIGHTNESS_MULT = 6.0;     // was 3.2 — firing flash pops much harder
+const FLASH_SCALE_MULT = 2.2;          // NEW — firing nodes visually swell up to ~3.2x size
 
 // --- Hebbian plasticity: edges strengthen with use, decay when idle ---------
 let LEARN_RATE = 0.04;        // live — weight gained by an edge that helped cause a fire
@@ -443,6 +470,9 @@ const WEIGHT_MIN = 0.2;       // floor a decayed, unused edge settles at
 const WEIGHT_MAX = 3.0;       // ceiling a well-used edge saturates at
 let plasticityEnabled = true; // live — when false, weights freeze: no strengthening, no decay
 const CONTRIBUTION_WINDOW = 0.2; // seconds an arrival stays "recent" enough to get credit if its target then fires
+
+const EDGE_RESTING_BRIGHTNESS = 0.015; // was 0.04 — near-invisible at rest, even at default weight
+const EDGE_WEIGHT_RAMP = 0.55;         // was 1.1 — even a fully reinforced edge stays secondary to signals
 
 // ---------------------------------------------------------------------------
 // Everything below DOES depend on NODE_COUNT / graph topology. Declared here as
@@ -454,6 +484,7 @@ let edgeList, adjacency, adjacencyEdge, edgeWeights, edgeColorArray, edgeColorAt
 let activation, threshold, thresholdJitter, refractoryTimer, fireFlashRemaining, recentContribs;
 let activeSignals = [];
 let signalMesh, MAX_ACTIVE_SIGNALS;
+const flashingNodes = new Set(); // node indices currently mid fire-flash (see updateNodes' scale-pop pass)
 
 function disposeGraphObjects() {
   if (nodeMesh) { scene.remove(nodeMesh); nodeMesh.geometry.dispose(); }
@@ -466,10 +497,12 @@ function disposeGraphObjects() {
 // once at startup and again whenever the "Node count" slider changes.
 function buildGraph(count) {
   disposeGraphObjects();
+  flashingNodes.clear();
+  scheduledBurstFlashes.length = 0; // node indices from the old graph are meaningless now
 
   NODE_COUNT = count;
   currentNodeSize = nodeSizeFor(count);
-  signalHeadRadius = currentNodeSize * 0.9;
+  signalHeadRadius = currentNodeSize * SIGNAL_HEAD_SCALE;
 
   // --- nodes: one InstancedMesh of small glowing spheres (single draw call) ---
   nodePositions = [];
@@ -581,6 +614,70 @@ function injectRandomSignal() {
   spawnSignal(start, neighbors[k], SIGNAL_STRENGTH, adjacencyEdge[start][k]);
 }
 
+// Manually scripts a guaranteed multi-hop pulse outward from a random origin
+// node, rather than relying on a spike to naturally chain-react.
+//
+// Earlier version of this fed the guaranteed hops through activation[] (a big
+// direct bump per node), relying on the normal threshold check to "confirm"
+// each fire. A 60-90s soak test showed that still leaks: forcing many nearby
+// nodes to fire at once means some of their spawned signals converge on the
+// same shared downstream neighbor, and CONVERGENT summation (two arrivals
+// landing before either decays) crosses threshold even when a single arrival
+// safely wouldn't — so the network very slowly crept toward full saturation
+// over a minute or two, invisible in short tests.
+//
+// This version sidesteps that entirely: the guaranteed hops are scheduled
+// events that directly set the "just fired" flash + spawn outward signals
+// (see processScheduledBurstFlashes), the same visible effect as a real fire,
+// without ever touching activation[]/threshold for the guaranteed core. There
+// is no way for this to accumulate, because it never depends on a threshold
+// check succeeding. The outward signals it spawns can still organically
+// trigger a *little* real extra spread beyond the scripted radius (that's
+// normal core-mechanics firing, unavoidable and fine) but that spread is
+// bounded by the same safe SIGNAL_STRENGTH/BASE_THRESHOLD margin used
+// everywhere else, not by this function's own logic.
+const DRAMATIC_BURST_HOPS = 2;
+const DRAMATIC_BURST_HOP_DELAY = 0.75; // seconds between each expanding ring — roughly matches real signal travel time
+let scheduledBurstFlashes = []; // { fireAt, node } — consumed by processScheduledBurstFlashes each frame
+
+function injectDramaticBurst(now) {
+  const origin = Math.floor(Math.random() * NODE_COUNT);
+  const visited = new Set([origin]);
+  let frontier = [origin];
+
+  for (let hop = 0; hop <= DRAMATIC_BURST_HOPS && frontier.length > 0; hop++) {
+    for (const node of frontier) {
+      scheduledBurstFlashes.push({ fireAt: now + hop * DRAMATIC_BURST_HOP_DELAY, node });
+    }
+    const nextFrontier = [];
+    for (const node of frontier) {
+      for (const n of adjacency[node]) {
+        if (!visited.has(n)) { visited.add(n); nextFrontier.push(n); }
+      }
+    }
+    frontier = nextFrontier;
+  }
+}
+
+// Fires whichever scheduled dramatic-burst events are due, giving the same
+// visible flash + outward signals as a real fire (see injectDramaticBurst's
+// comment for why this bypasses activation[]/threshold for the guaranteed core).
+function processScheduledBurstFlashes(now) {
+  while (scheduledBurstFlashes.length > 0 && scheduledBurstFlashes[0].fireAt <= now) {
+    const { node } = scheduledBurstFlashes.shift();
+    if (refractoryTimer[node] > 0) continue; // real activity already has this node mid-refractory; skip rather than fight it
+
+    for (let k = 0; k < adjacency[node].length; k++) {
+      spawnSignal(node, adjacency[node][k], SIGNAL_STRENGTH, adjacencyEdge[node][k]);
+    }
+    activation[node] = 0;
+    refractoryTimer[node] = REFRACTORY_TIME;
+    fireFlashRemaining[node] = FLASH_DURATION;
+    flashingNodes.add(node);
+    fireTimestamps.push(now); // feeds the "firing rate" stat, same as a real fire
+  }
+}
+
 // Advances every signal's progress and resolves arrivals. Arriving no longer
 // forwards blindly to neighbors — it just deposits charge into the target node's
 // activation. Whether that charge causes a fire (and a re-broadcast) is decided
@@ -642,7 +739,30 @@ function updateSignals(dt, now) {
 // all neighbors" rule: a node only re-broadcasts once its own accumulated charge crosses
 // its threshold, and it can't fire again until its refractory window elapses — that
 // combination is what naturally caps runaway spreading instead of a hop counter.
+// Load-based firing suppression: a homeostatic safety valve, not a change to
+// the normal per-node threshold/decay formulas. This model has a sharp
+// critical point (see the SIGNAL_STRENGTH/BASE_THRESHOLD note above) — even
+// values where a single signal provably never cascades can still leak upward
+// forever, because a dense burst of simultaneous nearby fires causes
+// convergent summation (two signals landing on the same shared neighbor add
+// together, crossing threshold when neither alone would). That leak was
+// confirmed via 60-180s simulated soak tests. An earlier version of this
+// tried extra *decay* under load, but decay is applied once per frame and
+// barely dents convergent arrivals that land within the same frame or two of
+// each other — it settled the runaway into a permanently-elevated plateau
+// (~1800 concurrent signals) rather than actually calming back toward dark.
+// Suppressing new fires outright while the signal pool is unusually busy is
+// far more direct: existing signals still arrive and still deposit charge
+// (so a node can still visibly "charge up"), it just can't re-broadcast
+// while the network's already saturated with traffic — which lets the
+// existing traffic drain out (via normal arrival) much faster than any new
+// traffic can be added, so it actually returns to a mostly-dark rest state
+// between waves instead of idling at an elevated plateau.
+const FIRING_SUPPRESSED_ABOVE = 0.01; // fraction of MAX_ACTIVE_SIGNALS considered "too hot" to keep re-broadcasting
+
 function updateNodes(dt, now) {
+  const firingSuppressed = activeSignals.length > MAX_ACTIVE_SIGNALS * FIRING_SUPPRESSED_ABOVE;
+
   for (let i = 0; i < NODE_COUNT; i++) {
     if (refractoryTimer[i] > 0) refractoryTimer[i] -= dt;
     if (fireFlashRemaining[i] > 0) fireFlashRemaining[i] -= dt;
@@ -651,7 +771,8 @@ function updateNodes(dt, now) {
     activation[i] *= Math.exp(-DECAY_RATE * dt);
 
     // Fire when charge crosses threshold and the node isn't still refractory
-    if (activation[i] >= threshold[i] && refractoryTimer[i] <= 0) {
+    // (or, briefly, while the network is overloaded — see the note above)
+    if (activation[i] >= threshold[i] && refractoryTimer[i] <= 0 && !firingSuppressed) {
       for (let k = 0; k < adjacency[i].length; k++) {
         spawnSignal(i, adjacency[i][k], SIGNAL_STRENGTH, adjacencyEdge[i][k]);
       }
@@ -670,6 +791,7 @@ function updateNodes(dt, now) {
       activation[i] = 0;
       refractoryTimer[i] = REFRACTORY_TIME;
       fireFlashRemaining[i] = FLASH_DURATION;
+      flashingNodes.add(i); // tracked so the scale-pop pass below only touches actively-flashing nodes
       fireTimestamps.push(now); // feeds the "firing rate" stat
     }
 
@@ -679,14 +801,30 @@ function updateNodes(dt, now) {
     // all bloom at once and wash out into a single blob — the contrast between
     // dim/resting and bright/active is what makes propagation visible at all.
     const ratio = Math.min(activation[i] / threshold[i], 1);
-    color.copy(nodeBaseColors[i]).multiplyScalar(0.14 + ratio * 1.3);
+    color.copy(nodeBaseColors[i]).multiplyScalar(NODE_RESTING_BRIGHTNESS + ratio * NODE_CHARGE_RAMP);
     if (fireFlashRemaining[i] > 0) {
       const f = fireFlashRemaining[i] / FLASH_DURATION;
-      color.lerp(WHITE, f * 0.95).multiplyScalar(1 + f * 3.2);
+      color.lerp(WHITE, f * FLASH_WHITE_LERP).multiplyScalar(1 + f * FLASH_BRIGHTNESS_MULT);
     }
     nodeMesh.setColorAt(i, color);
   }
   nodeMesh.instanceColor.needsUpdate = true;
+
+  // Scale-pop pass: a firing node briefly swells up to ~3x size on top of its
+  // brightness flash, so it visibly "pops" against the darker resting network.
+  // Bounded to just the nodes currently mid-flash (usually a handful), not a
+  // full NODE_COUNT pass, so this stays cheap even at thousands of nodes.
+  if (flashingNodes.size > 0) {
+    for (const i of flashingNodes) {
+      const f = Math.max(fireFlashRemaining[i], 0) / FLASH_DURATION;
+      dummy.position.copy(nodePositions[i]);
+      dummy.scale.setScalar(1 + f * FLASH_SCALE_MULT);
+      dummy.updateMatrix();
+      nodeMesh.setMatrixAt(i, dummy.matrix);
+      if (fireFlashRemaining[i] <= 0) flashingNodes.delete(i);
+    }
+    nodeMesh.instanceMatrix.needsUpdate = true;
+  }
 }
 
 // Per-frame edge-weight maintenance: continuous decay toward WEIGHT_MIN (skipped
@@ -704,8 +842,9 @@ function updateEdgeWeights(dt) {
     const wNorm = (edgeWeights[e] - WEIGHT_MIN) / (WEIGHT_MAX - WEIGHT_MIN);
     // Kept dim at default/low weight (below the bloom threshold, additive
     // blending would otherwise sum thousands of overlapping default-weight
-    // edges into a solid wash) so only genuinely reinforced pathways bloom.
-    const brightness = 0.04 + 1.1 * wNorm; // near-invisible at WEIGHT_MIN, bloom-bright at WEIGHT_MAX
+    // edges into a solid wash) so only genuinely reinforced pathways bloom —
+    // and even those stay secondary to the much brighter traveling signals.
+    const brightness = EDGE_RESTING_BRIGHTNESS + EDGE_WEIGHT_RAMP * wNorm; // near-invisible at WEIGHT_MIN
     const i6 = e * 6;
     arr[i6] = EDGE_BASE_COLOR.r * brightness;
     arr[i6 + 1] = EDGE_BASE_COLOR.g * brightness;
@@ -793,9 +932,21 @@ function resetSimulation() {
   activeSignals = [];
   signalMesh.count = 0;
   fireTimestamps.length = 0;
+  scheduledBurstFlashes.length = 0;
+
+  // Any node mid-flash has a swollen scale (see updateNodes' scale-pop pass) —
+  // shrink those back to normal before dropping them from tracking.
+  for (const i of flashingNodes) {
+    dummy.position.copy(nodePositions[i]);
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    nodeMesh.setMatrixAt(i, dummy.matrix);
+  }
+  flashingNodes.clear();
+  nodeMesh.instanceMatrix.needsUpdate = true;
 
   for (let i = 0; i < NODE_COUNT; i++) {
-    color.copy(nodeBaseColors[i]).multiplyScalar(0.14); // ratio=0 resting brightness, see updateNodes
+    color.copy(nodeBaseColors[i]).multiplyScalar(NODE_RESTING_BRIGHTNESS); // ratio=0 resting brightness, see updateNodes
     nodeMesh.setColorAt(i, color);
   }
   nodeMesh.instanceColor.needsUpdate = true;
@@ -899,6 +1050,8 @@ function rebuildEverything(count) {
   buildGraph(count);
   fireTimestamps.length = 0;
   statsTimer = 0;
+  autoBurstTimer = 0;
+  dramaticBurstTimer = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -939,6 +1092,17 @@ function applyCinematicDrift(now) {
 }
 
 // ---------------------------------------------------------------------------
+// Keep-alive injectors: the network should never look idle. A small random
+// burst every 1-2s keeps some traffic on the wire even if natural cascades
+// happen to die out, and a much larger single-node spike every ~4s reads as a
+// deliberate wave sweeping outward from one point across the whole graph.
+// ---------------------------------------------------------------------------
+let autoBurstTimer = 0;
+let nextAutoBurstInterval = 1 + Math.random(); // re-rolled each time, 1-2s
+const DRAMATIC_BURST_INTERVAL = 4.0;
+let dramaticBurstTimer = 0;
+
+// ---------------------------------------------------------------------------
 // Render loop
 // ---------------------------------------------------------------------------
 const clock = new THREE.Clock();
@@ -949,6 +1113,29 @@ function animate() {
   const now = clock.elapsedTime;
 
   if (!paused) {
+    autoBurstTimer += dt;
+    if (autoBurstTimer >= nextAutoBurstInterval) {
+      autoBurstTimer = 0;
+      nextAutoBurstInterval = 1 + Math.random();
+      injectRandomSignal();
+    }
+
+    dramaticBurstTimer += dt;
+    if (dramaticBurstTimer >= DRAMATIC_BURST_INTERVAL) {
+      // Throttle: only fire once the network's actually calmed back down.
+      // Without this, repeated bursts stack their leftover activity on top of
+      // each other every cycle and slowly creep toward permanent full-network
+      // saturation over a minute or two (confirmed via a 60s soak test) even
+      // though each individual burst looks fine in isolation. If it's still
+      // busy, just keep waiting — the timer isn't reset, so it fires the
+      // moment things quiet down instead of only on the next 4s tick.
+      if (activeSignals.length < MAX_ACTIVE_SIGNALS * 0.12) {
+        dramaticBurstTimer = 0;
+        injectDramaticBurst(now);
+      }
+    }
+
+    processScheduledBurstFlashes(now);
     updateSignals(dt, now);
     updateNodes(dt, now);
     updateEdgeWeights(dt);
