@@ -22,7 +22,7 @@ jobs:
           cp -r propagation.html LICENSE README.md assets index.html out/
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v1
+        uses: actions/upload-pages-artifact@v2
         with:
           path: ./out
 
