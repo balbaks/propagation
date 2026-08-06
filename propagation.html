@@ -1,0 +1,1159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Propagation — Node Network</title>
+<style>
+  /* Full-bleed canvas, no scrollbars, black background so nodes glow */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+
+  /* Subtle radial vignette so the glowing core pops against pure black */
+  #vignette {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 5;
+    background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 45%, rgba(0, 0, 0, 0.65) 100%);
+  }
+
+  /* Instrument-panel overlays. pointer-events:none on the panel itself lets a
+     mouse-drag that merely passes over the panel's padding/background still
+     rotate the 3D view underneath; only the actual controls re-enable it. */
+  .panel {
+    position: fixed;
+    top: 12px;
+    background: rgba(10, 14, 20, 0.72);
+    color: #e6f0ff;
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 12px 14px;
+    border-radius: 10px;
+    z-index: 10;
+    pointer-events: none;
+    user-select: none;
+  }
+  .panel.hidden { display: none; } /* cinematic mode hides both overlays */
+  .panel h3 {
+    margin: 0 0 10px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8fb4ff;
+    font-weight: 600;
+  }
+  .panel .subheading {
+    margin: 14px 0 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8fb4ff;
+    font-weight: 600;
+  }
+  #controls-panel { left: 12px; width: 232px; }
+  #stats-panel { right: 12px; text-align: right; }
+
+  .slider-row { margin-bottom: 10px; }
+  .slider-row .row-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #b8c6da;
+    margin-bottom: 3px;
+  }
+  .slider-row .row-label span:last-child { color: #7cffb2; font-variant-numeric: tabular-nums; }
+  .panel input[type="range"] {
+    width: 100%;
+    pointer-events: auto;
+    accent-color: #3a9bff;
+  }
+  .buttons-row { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .panel button {
+    flex: 1;
+    background: #1b2636;
+    border: 1px solid #2e3f57;
+    color: #dce8ff;
+    padding: 6px 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+    pointer-events: auto;
+  }
+  .panel button:hover { background: #243149; }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    font-size: 11px;
+    color: #b8c6da;
+  }
+  .panel input[type="checkbox"] { pointer-events: auto; }
+  #stats-panel div { margin-bottom: 4px; }
+  #stats-panel span { color: #7cffb2; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #rebuild-indicator {
+    display: none;
+    margin-top: 6px;
+    font-size: 11px;
+    color: #ffcf7c;
+  }
+</style>
+</head>
+<body>
+
+<div id="vignette"></div>
+
+<!-- Control panel: sliders bound live to the firing constants, plus transport buttons -->
+<div id="controls-panel" class="panel">
+  <h3>Controls</h3>
+
+  <div class="slider-row">
+    <div class="row-label"><span>Node count</span><span id="val-nodecount"></span></div>
+    <input type="range" id="slider-nodecount" min="500" max="5000" step="100">
+  </div>
+  <div id="rebuild-indicator">Rebuilding graph…</div>
+
+  <div class="slider-row">
+    <div class="row-label"><span>Signal speed</span><span id="val-speed"></span></div>
+    <input type="range" id="slider-speed" min="0.2" max="5" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Signal strength</span><span id="val-strength"></span></div>
+    <input type="range" id="slider-strength" min="0.1" max="1.5" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Base threshold</span><span id="val-threshold"></span></div>
+    <input type="range" id="slider-threshold" min="0.5" max="2.5" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Decay rate</span><span id="val-decay"></span></div>
+    <input type="range" id="slider-decay" min="0.1" max="3" step="0.01">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Refractory time</span><span id="val-refractory"></span></div>
+    <input type="range" id="slider-refractory" min="0.1" max="1.5" step="0.01">
+  </div>
+
+  <div class="buttons-row">
+    <button id="btn-pause">Pause</button>
+    <button id="btn-reset">Reset</button>
+    <button id="btn-burst">Random Burst</button>
+  </div>
+  <div class="buttons-row">
+    <button id="btn-cinematic" title="Hide UI + slow drift (press C to toggle)">Cinematic Mode (C)</button>
+  </div>
+
+  <label class="checkbox-row">
+    <input type="checkbox" id="chk-autorotate">
+    <span>Auto-rotate</span>
+  </label>
+
+  <div class="subheading">Plasticity</div>
+  <div class="slider-row">
+    <div class="row-label"><span>Learn rate</span><span id="val-learnrate"></span></div>
+    <input type="range" id="slider-learnrate" min="0" max="0.2" step="0.001">
+  </div>
+  <div class="slider-row">
+    <div class="row-label"><span>Decay / sec</span><span id="val-decaypersec"></span></div>
+    <input type="range" id="slider-decaypersec" min="0" max="0.5" step="0.005">
+  </div>
+  <label class="checkbox-row">
+    <input type="checkbox" id="chk-plasticity">
+    <span>Plasticity ON/OFF</span>
+  </label>
+</div>
+
+<!-- Stats overlay: live readout of firing activity -->
+<div id="stats-panel" class="panel">
+  <h3>Stats</h3>
+  <div>Firing rate: <span id="stat-firing">0</span>/s</div>
+  <div>Active signals: <span id="stat-signals">0</span></div>
+  <div>Active nodes: <span id="stat-nodes">0</span></div>
+</div>
+
+<!-- Import map lets the browser resolve bare "three" specifiers straight from a CDN — no bundler needed -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+let NODE_COUNT = 3000;         // live — rebuilds the whole graph when changed via slider
+const SPHERE_RADIUS = 16;      // radius of the volume nodes are scattered in
+const NODE_SIZE_BASE = 0.16;   // node radius tuned at the original 500-node density
+const MIN_NEIGHBORS = 3;
+const MAX_NEIGHBORS = 4;
+
+// Node (and signal-head) radius shrinks a bit as density goes up, so 5000 nodes
+// reads as a dense starfield instead of one solid merged blob.
+function nodeSizeFor(count) {
+  return Math.max(0.045, NODE_SIZE_BASE * Math.cbrt(500 / count));
+}
+
+// ---------------------------------------------------------------------------
+// Renderer / scene / camera
+// ---------------------------------------------------------------------------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(
+  55, window.innerWidth / window.innerHeight, 0.1, 1000
+);
+// Pull the camera back far enough that the whole sphere volume fits in view
+const fitDistance = SPHERE_RADIUS / Math.sin((camera.fov * Math.PI / 180) / 2);
+camera.position.set(0, 0, fitDistance * 1.15);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+// OrbitControls: mouse-drag to rotate, wheel to zoom, right-drag to pan
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.zoomSpeed = 0.3;                    // gentler wheel zoom (VM scroll deltas can be huge)
+controls.minDistance = SPHERE_RADIUS * 0.6;
+controls.maxDistance = SPHERE_RADIUS * 4;
+controls.autoRotate = true;       // slow idle spin; user input still overrides it
+controls.autoRotateSpeed = 0.4;
+controls.target.set(0, 0, 0);
+
+// ---------------------------------------------------------------------------
+// Post-processing: bloom pass gives the scene its luminous look. Pushed a lot
+// stronger than the original subtle glow for maximum spectacle.
+// ---------------------------------------------------------------------------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  1.8,   // strength — was 1.2 originally; pushed up for spectacle but pulled back from 2.5
+  0.55,  // radius — was 0.5 originally; pushed up but pulled back from 0.7
+  0.22   // threshold — raised from 0.15 so resting/idle geometry stays under it (see brightness tuning below)
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+// ---------------------------------------------------------------------------
+// Shared materials/geometry that do NOT depend on NODE_COUNT — created once and
+// reused across every graph rebuild (only per-count geometries/meshes get
+// recreated in buildGraph()).
+// ---------------------------------------------------------------------------
+const dummy = new THREE.Object3D();
+const color = new THREE.Color();
+const WHITE = new THREE.Color(0xffffff);
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
+
+// NOTE: vertexColors is intentionally NOT set here. InstancedMesh per-instance
+// color (via setColorAt/instanceColor) is wired up automatically regardless of
+// that flag; turning it on actually breaks rendering, because it also makes the
+// vertex shader require a per-vertex `color` geometry attribute we never provide,
+// which defaults to (0,0,0,1) and zeroes the instance color out entirely (black).
+// Additive blending + depthWrite:false gives dense, overlapping activity a real
+// "hotspot" glow instead of flat opaque coverage.
+const nodeMaterial = new THREE.MeshBasicMaterial({
+  color: 0xffffff,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  depthWrite: false,
+});
+
+const EDGE_BASE_COLOR = new THREE.Color(0x3a7bff);
+// Plain per-vertex geometry color (a real `color` attribute) is exactly what
+// vertexColors is meant for — unlike the InstancedMesh nodes/signals, there's no
+// missing-attribute trap here, so vertexColors:true is correct and required.
+const edgeMaterial = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  opacity: 0.9,
+  depthWrite: false,
+});
+
+// Signal "comet" geometry: a unit cone (radius 1, height 1) with a baked
+// head-to-tail vertex-color gradient (bright at the wide head, ~black at the
+// tapering tail tip). Built ONCE at unit size; per-instance scale in
+// updateSignals stretches it to each signal's actual head radius/trail length.
+// Translating by +0.5 moves the wide base from y=-0.5 to y=0 (the head) and the
+// apex from y=+0.5 to y=1 (the tail tip), matching the local-space convention
+// used when orienting/positioning each instance below.
+function createTrailGeometry() {
+  const geo = new THREE.ConeGeometry(1, 1, 6, 1, false);
+  geo.translate(0, 0.5, 0);
+
+  const posAttr = geo.attributes.position;
+  const colors = new Float32Array(posAttr.count * 3);
+  for (let v = 0; v < posAttr.count; v++) {
+    const t = THREE.MathUtils.clamp(posAttr.getY(v), 0, 1); // 0 at head, 1 at tail tip
+    const b = 1 - t; // bright at head, fades toward black at the tail
+    colors[v * 3] = b;
+    colors[v * 3 + 1] = b;
+    colors[v * 3 + 2] = b;
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  return geo;
+}
+const signalGeometry = createTrailGeometry();
+// vertexColors:true is required here so the baked head/tail gradient above (a
+// real geometry `color` attribute) actually reaches the fragment shader; it's
+// then multiplied by each instance's own travel-gradient color (see
+// colorForProgress), giving a comet that's bright cyan/magenta/white at the
+// head and fades to nothing at the tail.
+const signalMaterial = new THREE.MeshBasicMaterial({
+  color: 0xffffff,
+  vertexColors: true,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  depthWrite: false,
+});
+const signalDummy = new THREE.Object3D();
+const signalColor = new THREE.Color();
+
+// Signals are the star of the show: long, bright, chunky comets that dominate
+// over the now much-dimmer resting network (see node/edge brightness tuning
+// further down) — this contrast is the whole point of the "electric" look.
+const TRAIL_FRACTION = 0.45;    // trail length as a fraction of the edge it's crossing (was 0.22)
+const SIGNAL_BRIGHTNESS = 5.0;  // pushes signal color well past 1.0 so bloom picks it out hard (was 2.2)
+const SIGNAL_HEAD_SCALE = 1.5;  // head radius multiplier vs. node size (was implicitly 0.9)
+
+// Hot travel gradient: cyan (just fired) -> magenta (mid-flight) -> white (about to arrive)
+const GRADIENT_A = new THREE.Color(0x00ffff);
+const GRADIENT_B = new THREE.Color(0xff00ff);
+const GRADIENT_C = new THREE.Color(0xffffff);
+function colorForProgress(t, out) {
+  if (t < 0.5) out.copy(GRADIENT_A).lerp(GRADIENT_B, t / 0.5);
+  else out.copy(GRADIENT_B).lerp(GRADIENT_C, (t - 0.5) / 0.5);
+  return out;
+}
+
+function randomPointInSphere(radius) {
+  // Random direction via normalized gaussian-ish component sampling
+  const u = Math.random();
+  const v = Math.random();
+  const theta = 2 * Math.PI * u;
+  const phi = Math.acos(2 * v - 1);
+  // cbrt of a uniform random gives uniform density over the *volume*
+  // (sampling r linearly would bias points toward the center)
+  const r = radius * Math.cbrt(Math.random());
+
+  const x = r * Math.sin(phi) * Math.cos(theta);
+  const y = r * Math.sin(phi) * Math.sin(theta);
+  const z = r * Math.cos(phi);
+  return new THREE.Vector3(x, y, z);
+}
+
+// Connects each node to ~3-4 nearby neighbors using a uniform spatial grid
+// instead of brute-force all-pairs distance. All-pairs is O(n^2 log n) (sorting
+// every node's full distance list) and gets far too slow once NODE_COUNT reaches
+// into the thousands; bucketing into a grid and only comparing each node against
+// its own + neighboring cells keeps this fast enough for on-the-fly rebuilds.
+function computeEdges(positions, nodeCount) {
+  const cellSize = Math.max(0.75, (SPHERE_RADIUS * 2) / Math.cbrt(nodeCount) * 1.6);
+  const grid = new Map();
+  const keyOf = (cx, cy, cz) => `${cx}_${cy}_${cz}`;
+
+  for (let i = 0; i < nodeCount; i++) {
+    const p = positions[i];
+    const key = keyOf(Math.floor(p.x / cellSize), Math.floor(p.y / cellSize), Math.floor(p.z / cellSize));
+    let bucket = grid.get(key);
+    if (!bucket) { bucket = []; grid.set(key, bucket); }
+    bucket.push(i);
+  }
+
+  const edgeKeys = new Set();        // dedupe so a mutual pair only draws one line
+  const linePositions = [];
+  const edgeList = [];               // edgeList[e] = [i, j]; e also indexes edgeWeights/edgeColorArray
+  const adjacency = Array.from({ length: nodeCount }, () => []);
+  const adjacencyEdge = Array.from({ length: nodeCount }, () => []); // adjacencyEdge[i][k] = edge index for adjacency[i][k]
+
+  for (let i = 0; i < nodeCount; i++) {
+    const p = positions[i];
+    const cx = Math.floor(p.x / cellSize), cy = Math.floor(p.y / cellSize), cz = Math.floor(p.z / cellSize);
+
+    // Widen the search ring outward until there are enough candidates to pick neighbors from
+    let candidates = [];
+    for (let r = 1; r <= 4 && candidates.length <= MAX_NEIGHBORS; r++) {
+      candidates = [];
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dz = -r; dz <= r; dz++) {
+            const bucket = grid.get(keyOf(cx + dx, cy + dy, cz + dz));
+            if (bucket) for (const j of bucket) if (j !== i) candidates.push(j);
+          }
+        }
+      }
+    }
+
+    candidates.sort((a, b) => p.distanceToSquared(positions[a]) - p.distanceToSquared(positions[b]));
+
+    const neighborCount = Math.min(
+      candidates.length,
+      MIN_NEIGHBORS + Math.floor(Math.random() * (MAX_NEIGHBORS - MIN_NEIGHBORS + 1))
+    );
+    for (let n = 0; n < neighborCount; n++) {
+      const j = candidates[n];
+      const key = i < j ? `${i}_${j}` : `${j}_${i}`;
+      if (edgeKeys.has(key)) continue;
+      edgeKeys.add(key);
+
+      const e = edgeList.length;
+      edgeList.push([i, j]);
+      adjacency[i].push(j); adjacencyEdge[i].push(e);
+      adjacency[j].push(i); adjacencyEdge[j].push(e);
+
+      const a = positions[i], b = positions[j];
+      linePositions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  }
+
+  return { linePositions, edgeList, adjacency, adjacencyEdge };
+}
+
+// ---------------------------------------------------------------------------
+// Neuron-like firing: tunable constants (adjust these to change the rhythm).
+// These do NOT depend on NODE_COUNT, so they live outside buildGraph() and
+// survive graph rebuilds untouched. The ones marked "live" are `let`, not
+// `const` — the control panel further down rebinds them directly.
+// ---------------------------------------------------------------------------
+let SIGNAL_SPEED = 1.5;           // live — progress units / second -> ~0.67s to cross an edge
+// NOTE on these two: this cascade model has a sharp critical point (classic
+// branching-process behavior). Testing (60-90s simulated soak tests) found
+// two failure modes: (1) combos that reliably chain-react run away to ~55-60%
+// of the ENTIRE network firing simultaneously, permanently — worse than the
+// original "too calm" problem; (2) even combos where a SINGLE signal safely
+// never cascades can still slowly leak upward forever, because a burst that
+// fires many nearby nodes at once causes CONVERGENT summation — two signals
+// landing on the same shared downstream neighbor add together, crossing
+// threshold even though neither would have alone. A single 0.55-strength
+// signal against a 1.0 threshold has enough margin that even 2x convergence
+// mostly doesn't cross it. Keep this margin: don't push these values further
+// without re-running the soak test in the `run` skill or similar.
+let SIGNAL_STRENGTH = 0.6;        // live — activation deposited into a node per incoming signal (was 0.55 — a small, safe nudge)
+const CLICK_STRENGTH = 2.0;       // activation added by a manual click injection (always fires)
+let BASE_THRESHOLD = 1.0;         // live — activation level a node must cross to fire (kept at the original value — see note above)
+const THRESHOLD_JITTER = 0.25;    // +/- random spread per node so they don't fire in lockstep
+let DECAY_RATE = 1.1;             // live — leaky-integration decay rate; higher drains charge faster
+let REFRACTORY_TIME = 0.5;        // live — seconds a node ignores input / can't re-fire after firing
+const FLASH_DURATION = 0.3;       // seconds for the white "just fired" flash to fade out
+
+// --- Brightness contrast: dark idle network, brilliant active one -----------
+// The network should read as mostly DARK at rest, lighting up sharply only
+// where signals travel and nodes fire — these stay well under the bloom
+// threshold (0.22) at rest so thousands of idle nodes/edges don't wash the
+// scene into a uniform glow (that washout was the exact problem being fixed).
+const NODE_RESTING_BRIGHTNESS = 0.045; // was 0.14 — much darker at rest
+const NODE_CHARGE_RAMP = 1.0;          // brightness added as activation approaches threshold (was 1.3)
+const FLASH_WHITE_LERP = 0.98;         // was 0.95 — firing flash goes almost pure white
+const FLASH_BRIGHTNESS_MULT = 6.0;     // was 3.2 — firing flash pops much harder
+const FLASH_SCALE_MULT = 2.2;          // NEW — firing nodes visually swell up to ~3.2x size
+
+// --- Hebbian plasticity: edges strengthen with use, decay when idle ---------
+let LEARN_RATE = 0.04;        // live — weight gained by an edge that helped cause a fire
+let DECAY_PER_SEC = 0.02;     // live — weight lost per second by every edge (paused by the checkbox below)
+const WEIGHT_MIN = 0.2;       // floor a decayed, unused edge settles at
+const WEIGHT_MAX = 3.0;       // ceiling a well-used edge saturates at
+let plasticityEnabled = true; // live — when false, weights freeze: no strengthening, no decay
+const CONTRIBUTION_WINDOW = 0.2; // seconds an arrival stays "recent" enough to get credit if its target then fires
+
+const EDGE_RESTING_BRIGHTNESS = 0.015; // was 0.04 — near-invisible at rest, even at default weight
+const EDGE_WEIGHT_RAMP = 0.55;         // was 1.1 — even a fully reinforced edge stays secondary to signals
+
+// ---------------------------------------------------------------------------
+// Everything below DOES depend on NODE_COUNT / graph topology. Declared here as
+// bare `let`s and populated by buildGraph(), which both the initial setup and
+// the "Node count" slider call to reconstruct the whole graph from scratch.
+// ---------------------------------------------------------------------------
+let nodePositions, nodeMesh, nodeBaseColors, currentNodeSize, signalHeadRadius;
+let edgeList, adjacency, adjacencyEdge, edgeWeights, edgeColorArray, edgeColorAttr, edges;
+let activation, threshold, thresholdJitter, refractoryTimer, fireFlashRemaining, recentContribs;
+let activeSignals = [];
+let signalMesh, MAX_ACTIVE_SIGNALS;
+const flashingNodes = new Set(); // node indices currently mid fire-flash (see updateNodes' scale-pop pass)
+
+function disposeGraphObjects() {
+  if (nodeMesh) { scene.remove(nodeMesh); nodeMesh.geometry.dispose(); }
+  if (edges) { scene.remove(edges); edges.geometry.dispose(); }
+  if (signalMesh) { scene.remove(signalMesh); signalMesh.geometry.dispose(); }
+}
+
+// (Re)builds the entire graph — node positions/mesh, edges + adjacency, all
+// per-node neuron state, and the signal pool — for a fresh NODE_COUNT. Called
+// once at startup and again whenever the "Node count" slider changes.
+function buildGraph(count) {
+  disposeGraphObjects();
+  flashingNodes.clear();
+  scheduledBurstFlashes.length = 0; // node indices from the old graph are meaningless now
+
+  NODE_COUNT = count;
+  currentNodeSize = nodeSizeFor(count);
+  signalHeadRadius = currentNodeSize * SIGNAL_HEAD_SCALE;
+
+  // --- nodes: one InstancedMesh of small glowing spheres (single draw call) ---
+  nodePositions = [];
+  for (let i = 0; i < count; i++) nodePositions.push(randomPointInSphere(SPHERE_RADIUS));
+
+  const nodeGeometry = new THREE.SphereGeometry(currentNodeSize, 8, 8);
+  nodeMesh = new THREE.InstancedMesh(nodeGeometry, nodeMaterial, count);
+
+  nodeBaseColors = []; // remembered so signal flashes can fade back to the real color
+  for (let i = 0; i < count; i++) {
+    const p = nodePositions[i];
+    dummy.position.copy(p);
+    dummy.updateMatrix();
+    nodeMesh.setMatrixAt(i, dummy.matrix);
+
+    // Hue shifts from cyan (center) to violet (edge) based on radial distance
+    const t = p.length() / SPHERE_RADIUS;
+    color.setHSL(0.55 - t * 0.2, 1.0, 0.55 + Math.random() * 0.15);
+    nodeMesh.setColorAt(i, color);
+    nodeBaseColors.push(color.clone());
+  }
+  nodeMesh.instanceMatrix.needsUpdate = true;
+  nodeMesh.instanceColor.needsUpdate = true;
+  scene.add(nodeMesh);
+
+  // --- edges: connect each node to its 3-4 nearest neighbors ---
+  const built = computeEdges(nodePositions, count);
+  edgeList = built.edgeList;
+  adjacency = built.adjacency;
+  adjacencyEdge = built.adjacencyEdge;
+
+  // Hebbian edge weights: one float per edge, all starting neutral at 1.0.
+  // edgeList's index is shared with edgeWeights and the per-vertex color
+  // buffer, so strengthening/decaying a weight and repainting its line are
+  // both simple index lookups.
+  edgeWeights = new Float32Array(edgeList.length).fill(1.0);
+  edgeColorArray = new Float32Array(edgeList.length * 6); // 2 vertices * rgb per edge
+
+  const edgeGeometry = new THREE.BufferGeometry();
+  edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(built.linePositions, 3));
+  edgeGeometry.setAttribute('color', new THREE.Float32BufferAttribute(edgeColorArray, 3));
+  edgeColorAttr = edgeGeometry.attributes.color;
+
+  edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+  scene.add(edges);
+
+  // --- per-node neuron state ---
+  activation = new Float32Array(count);         // current charge; decays toward 0
+  threshold = new Float32Array(count);          // fires once activation crosses this
+  thresholdJitter = new Float32Array(count);    // each node's fixed +/- offset from BASE_THRESHOLD
+  refractoryTimer = new Float32Array(count);    // >0 => refractory; 0 => resting
+  fireFlashRemaining = new Float32Array(count); // >0 => mid white "just fired" flash
+  recentContribs = Array.from({ length: count }, () => []); // recent {edgeIndex,time} arrivals, for Hebbian credit
+
+  for (let i = 0; i < count; i++) {
+    thresholdJitter[i] = (Math.random() - 0.5) * THRESHOLD_JITTER;
+    threshold[i] = BASE_THRESHOLD + thresholdJitter[i];
+  }
+
+  // --- signal pool: capacity scales with node count so denser graphs can carry more traffic ---
+  MAX_ACTIVE_SIGNALS = Math.min(20000, Math.round(count * 4));
+  activeSignals = [];
+  signalMesh = new THREE.InstancedMesh(signalGeometry, signalMaterial, MAX_ACTIVE_SIGNALS);
+  signalMesh.count = 0;
+  // Instances reposition across the whole graph every frame, and the mesh starts
+  // at count=0 (no instances yet) — three.js's auto-computed frustum-culling
+  // bounding sphere gets stuck at that initial empty state and never widens back
+  // out once real signals appear, silently culling the entire mesh forever.
+  // Frustum culling isn't a meaningful optimization here anyway (instances can be
+  // anywhere in the graph at any time), so just turn it off.
+  signalMesh.frustumCulled = false;
+  scene.add(signalMesh);
+
+  injectRandomSignal();
+}
+
+// Re-applies BASE_THRESHOLD to every node while preserving each node's own
+// jitter offset — called whenever the "Base threshold" slider moves.
+function applyBaseThreshold() {
+  for (let i = 0; i < NODE_COUNT; i++) {
+    threshold[i] = BASE_THRESHOLD + thresholdJitter[i];
+  }
+}
+
+function spawnSignal(source, target, strength, edgeIndex) {
+  if (activeSignals.length >= MAX_ACTIVE_SIGNALS) return; // drop if the pool is full
+  const a = nodePositions[source];
+  const b = nodePositions[target];
+  const dir = new THREE.Vector3().subVectors(b, a).normalize();
+  const edgeLength = a.distanceTo(b);
+  activeSignals.push({
+    source,
+    target,
+    progress: 0,
+    strength,
+    edgeIndex, // which edge this travels on — read for weight-modulated speed/strength, and for credit on arrival
+    trailLength: Math.max(0.05, edgeLength * TRAIL_FRACTION),
+    // Orients the comet's local +Y (head -> tail) to point back the way it came
+    quat: new THREE.Quaternion().setFromUnitVectors(UP_AXIS, dir.clone().negate()),
+  });
+}
+
+// Starts a fresh pulse from a random node toward one of its random neighbors
+function injectRandomSignal() {
+  const start = Math.floor(Math.random() * NODE_COUNT);
+  const neighbors = adjacency[start];
+  if (neighbors.length === 0) return;
+  const k = Math.floor(Math.random() * neighbors.length);
+  spawnSignal(start, neighbors[k], SIGNAL_STRENGTH, adjacencyEdge[start][k]);
+}
+
+// Manually scripts a guaranteed multi-hop pulse outward from a random origin
+// node, rather than relying on a spike to naturally chain-react.
+//
+// Earlier version of this fed the guaranteed hops through activation[] (a big
+// direct bump per node), relying on the normal threshold check to "confirm"
+// each fire. A 60-90s soak test showed that still leaks: forcing many nearby
+// nodes to fire at once means some of their spawned signals converge on the
+// same shared downstream neighbor, and CONVERGENT summation (two arrivals
+// landing before either decays) crosses threshold even when a single arrival
+// safely wouldn't — so the network very slowly crept toward full saturation
+// over a minute or two, invisible in short tests.
+//
+// This version sidesteps that entirely: the guaranteed hops are scheduled
+// events that directly set the "just fired" flash + spawn outward signals
+// (see processScheduledBurstFlashes), the same visible effect as a real fire,
+// without ever touching activation[]/threshold for the guaranteed core. There
+// is no way for this to accumulate, because it never depends on a threshold
+// check succeeding. The outward signals it spawns can still organically
+// trigger a *little* real extra spread beyond the scripted radius (that's
+// normal core-mechanics firing, unavoidable and fine) but that spread is
+// bounded by the same safe SIGNAL_STRENGTH/BASE_THRESHOLD margin used
+// everywhere else, not by this function's own logic.
+const DRAMATIC_BURST_HOPS = 2;
+const DRAMATIC_BURST_HOP_DELAY = 0.75; // seconds between each expanding ring — roughly matches real signal travel time
+let scheduledBurstFlashes = []; // { fireAt, node } — consumed by processScheduledBurstFlashes each frame
+
+function injectDramaticBurst(now) {
+  const origin = Math.floor(Math.random() * NODE_COUNT);
+  const visited = new Set([origin]);
+  let frontier = [origin];
+
+  for (let hop = 0; hop <= DRAMATIC_BURST_HOPS && frontier.length > 0; hop++) {
+    for (const node of frontier) {
+      scheduledBurstFlashes.push({ fireAt: now + hop * DRAMATIC_BURST_HOP_DELAY, node });
+    }
+    const nextFrontier = [];
+    for (const node of frontier) {
+      for (const n of adjacency[node]) {
+        if (!visited.has(n)) { visited.add(n); nextFrontier.push(n); }
+      }
+    }
+    frontier = nextFrontier;
+  }
+}
+
+// Fires whichever scheduled dramatic-burst events are due, giving the same
+// visible flash + outward signals as a real fire (see injectDramaticBurst's
+// comment for why this bypasses activation[]/threshold for the guaranteed core).
+function processScheduledBurstFlashes(now) {
+  while (scheduledBurstFlashes.length > 0 && scheduledBurstFlashes[0].fireAt <= now) {
+    const { node } = scheduledBurstFlashes.shift();
+    if (refractoryTimer[node] > 0) continue; // real activity already has this node mid-refractory; skip rather than fight it
+
+    for (let k = 0; k < adjacency[node].length; k++) {
+      spawnSignal(node, adjacency[node][k], SIGNAL_STRENGTH, adjacencyEdge[node][k]);
+    }
+    activation[node] = 0;
+    refractoryTimer[node] = REFRACTORY_TIME;
+    fireFlashRemaining[node] = FLASH_DURATION;
+    flashingNodes.add(node);
+    fireTimestamps.push(now); // feeds the "firing rate" stat, same as a real fire
+  }
+}
+
+// Advances every signal's progress and resolves arrivals. Arriving no longer
+// forwards blindly to neighbors — it just deposits charge into the target node's
+// activation. Whether that charge causes a fire (and a re-broadcast) is decided
+// per-node in updateNodes() below, based on that node's own threshold/refractory state.
+function updateSignals(dt, now) {
+  const next = [];
+  for (const s of activeSignals) {
+    // A well-used (high-weight) edge carries its signal a bit faster and, on
+    // arrival, deposits a bit more charge — the "self-reinforcing" half of
+    // Hebbian plasticity. wNorm is the edge's weight rescaled to 0..1.
+    const wNorm = (edgeWeights[s.edgeIndex] - WEIGHT_MIN) / (WEIGHT_MAX - WEIGHT_MIN);
+    const speedFactor = 0.75 + 0.35 * wNorm; // 0.75x at WEIGHT_MIN, 1.10x at WEIGHT_MAX
+    s.progress += SIGNAL_SPEED * speedFactor * dt;
+
+    if (s.progress >= 1) {
+      // A refractory node ignores incoming charge entirely
+      if (refractoryTimer[s.target] <= 0) {
+        const strengthFactor = 0.7 + 0.6 * wNorm; // 0.7x at WEIGHT_MIN, 1.3x at WEIGHT_MAX
+        activation[s.target] += s.strength * strengthFactor;
+
+        // Log this arrival so a fire within CONTRIBUTION_WINDOW can credit this edge
+        const contribs = recentContribs[s.target].filter((c) => now - c.time <= CONTRIBUTION_WINDOW);
+        contribs.push({ edgeIndex: s.edgeIndex, time: now });
+        recentContribs[s.target] = contribs;
+      }
+      // signal is consumed on arrival either way — not carried into `next`
+    } else {
+      next.push(s);
+    }
+  }
+  activeSignals = next;
+
+  // Render each surviving signal as a glowing comet: head at the lerped position
+  // along its edge, tail trailing back toward the source, colored by a hot
+  // cyan->magenta->white gradient keyed off travel progress.
+  signalMesh.count = activeSignals.length;
+  for (let i = 0; i < activeSignals.length; i++) {
+    const s = activeSignals[i];
+    const a = nodePositions[s.source];
+    const b = nodePositions[s.target];
+    signalDummy.position.lerpVectors(a, b, s.progress);
+    signalDummy.quaternion.copy(s.quat);
+    signalDummy.scale.set(signalHeadRadius, s.trailLength, signalHeadRadius);
+    signalDummy.updateMatrix();
+    signalMesh.setMatrixAt(i, signalDummy.matrix);
+
+    // Pushed well past 1.0 so bloom's threshold picks the comet out clearly;
+    // additive blending then stacks overlapping comets into bright hotspots.
+    colorForProgress(s.progress, signalColor).multiplyScalar(SIGNAL_BRIGHTNESS);
+    signalMesh.setColorAt(i, signalColor);
+  }
+  signalMesh.instanceMatrix.needsUpdate = true;
+  if (signalMesh.instanceColor) signalMesh.instanceColor.needsUpdate = true;
+}
+
+// Per-frame neuron update: leaky decay, refractory countdown, threshold check + firing,
+// then a brightness pass so charge is visible (dim at rest, brighter as it nears
+// threshold, intense white flash on fire). Firing is what replaces the old "forward to
+// all neighbors" rule: a node only re-broadcasts once its own accumulated charge crosses
+// its threshold, and it can't fire again until its refractory window elapses — that
+// combination is what naturally caps runaway spreading instead of a hop counter.
+// Load-based firing suppression: a homeostatic safety valve, not a change to
+// the normal per-node threshold/decay formulas. This model has a sharp
+// critical point (see the SIGNAL_STRENGTH/BASE_THRESHOLD note above) — even
+// values where a single signal provably never cascades can still leak upward
+// forever, because a dense burst of simultaneous nearby fires causes
+// convergent summation (two signals landing on the same shared neighbor add
+// together, crossing threshold when neither alone would). That leak was
+// confirmed via 60-180s simulated soak tests. An earlier version of this
+// tried extra *decay* under load, but decay is applied once per frame and
+// barely dents convergent arrivals that land within the same frame or two of
+// each other — it settled the runaway into a permanently-elevated plateau
+// (~1800 concurrent signals) rather than actually calming back toward dark.
+// Suppressing new fires outright while the signal pool is unusually busy is
+// far more direct: existing signals still arrive and still deposit charge
+// (so a node can still visibly "charge up"), it just can't re-broadcast
+// while the network's already saturated with traffic — which lets the
+// existing traffic drain out (via normal arrival) much faster than any new
+// traffic can be added, so it actually returns to a mostly-dark rest state
+// between waves instead of idling at an elevated plateau.
+const FIRING_SUPPRESSED_ABOVE = 0.01; // fraction of MAX_ACTIVE_SIGNALS considered "too hot" to keep re-broadcasting
+
+function updateNodes(dt, now) {
+  const firingSuppressed = activeSignals.length > MAX_ACTIVE_SIGNALS * FIRING_SUPPRESSED_ABOVE;
+
+  for (let i = 0; i < NODE_COUNT; i++) {
+    if (refractoryTimer[i] > 0) refractoryTimer[i] -= dt;
+    if (fireFlashRemaining[i] > 0) fireFlashRemaining[i] -= dt;
+
+    // Leaky integration: charge continuously bleeds back toward 0
+    activation[i] *= Math.exp(-DECAY_RATE * dt);
+
+    // Fire when charge crosses threshold and the node isn't still refractory
+    // (or, briefly, while the network is overloaded — see the note above)
+    if (activation[i] >= threshold[i] && refractoryTimer[i] <= 0 && !firingSuppressed) {
+      for (let k = 0; k < adjacency[i].length; k++) {
+        spawnSignal(i, adjacency[i][k], SIGNAL_STRENGTH, adjacencyEdge[i][k]);
+      }
+
+      // Hebbian strengthening: any edge that deposited charge into this node
+      // recently enough shares credit for the fire it just helped cause.
+      if (plasticityEnabled) {
+        for (const c of recentContribs[i]) {
+          if (now - c.time <= CONTRIBUTION_WINDOW) {
+            edgeWeights[c.edgeIndex] = Math.min(WEIGHT_MAX, edgeWeights[c.edgeIndex] + LEARN_RATE);
+          }
+        }
+      }
+      recentContribs[i].length = 0; // consumed — start collecting fresh credit for the next fire
+
+      activation[i] = 0;
+      refractoryTimer[i] = REFRACTORY_TIME;
+      fireFlashRemaining[i] = FLASH_DURATION;
+      flashingNodes.add(i); // tracked so the scale-pop pass below only touches actively-flashing nodes
+      fireTimestamps.push(now); // feeds the "firing rate" stat
+    }
+
+    // Brightness = base color scaled by activation ratio, plus an intense white
+    // flash on fire (pushed well past 1.0 so it briefly blooms hard). Kept low
+    // at rest (well under the bloom threshold) so thousands of idle nodes don't
+    // all bloom at once and wash out into a single blob — the contrast between
+    // dim/resting and bright/active is what makes propagation visible at all.
+    const ratio = Math.min(activation[i] / threshold[i], 1);
+    color.copy(nodeBaseColors[i]).multiplyScalar(NODE_RESTING_BRIGHTNESS + ratio * NODE_CHARGE_RAMP);
+    if (fireFlashRemaining[i] > 0) {
+      const f = fireFlashRemaining[i] / FLASH_DURATION;
+      color.lerp(WHITE, f * FLASH_WHITE_LERP).multiplyScalar(1 + f * FLASH_BRIGHTNESS_MULT);
+    }
+    nodeMesh.setColorAt(i, color);
+  }
+  nodeMesh.instanceColor.needsUpdate = true;
+
+  // Scale-pop pass: a firing node briefly swells up to ~3x size on top of its
+  // brightness flash, so it visibly "pops" against the darker resting network.
+  // Bounded to just the nodes currently mid-flash (usually a handful), not a
+  // full NODE_COUNT pass, so this stays cheap even at thousands of nodes.
+  if (flashingNodes.size > 0) {
+    for (const i of flashingNodes) {
+      const f = Math.max(fireFlashRemaining[i], 0) / FLASH_DURATION;
+      dummy.position.copy(nodePositions[i]);
+      dummy.scale.setScalar(1 + f * FLASH_SCALE_MULT);
+      dummy.updateMatrix();
+      nodeMesh.setMatrixAt(i, dummy.matrix);
+      if (fireFlashRemaining[i] <= 0) flashingNodes.delete(i);
+    }
+    nodeMesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+// Per-frame edge-weight maintenance: continuous decay toward WEIGHT_MIN (skipped
+// when plasticity is off, which freezes weights entirely), then repaint every
+// edge's line color from its current weight. This is the visible payoff of
+// plasticity — well-used pathways stay bright while dormant ones fade, so
+// distinct routes emerge from the graph over time instead of a uniform mesh.
+function updateEdgeWeights(dt) {
+  const arr = edgeColorAttr.array;
+  for (let e = 0; e < edgeList.length; e++) {
+    if (plasticityEnabled) {
+      edgeWeights[e] = Math.max(WEIGHT_MIN, edgeWeights[e] - DECAY_PER_SEC * dt);
+    }
+
+    const wNorm = (edgeWeights[e] - WEIGHT_MIN) / (WEIGHT_MAX - WEIGHT_MIN);
+    // Kept dim at default/low weight (below the bloom threshold, additive
+    // blending would otherwise sum thousands of overlapping default-weight
+    // edges into a solid wash) so only genuinely reinforced pathways bloom —
+    // and even those stay secondary to the much brighter traveling signals.
+    const brightness = EDGE_RESTING_BRIGHTNESS + EDGE_WEIGHT_RAMP * wNorm; // near-invisible at WEIGHT_MIN
+    const i6 = e * 6;
+    arr[i6] = EDGE_BASE_COLOR.r * brightness;
+    arr[i6 + 1] = EDGE_BASE_COLOR.g * brightness;
+    arr[i6 + 2] = EDGE_BASE_COLOR.b * brightness;
+    arr[i6 + 3] = arr[i6];
+    arr[i6 + 4] = arr[i6 + 1];
+    arr[i6 + 5] = arr[i6 + 2];
+  }
+  edgeColorAttr.needsUpdate = true;
+}
+
+// --- Injection: keyboard + mouse click --------------------------------------
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    e.preventDefault(); // stop the page from scrolling on spacebar
+    injectRandomSignal();
+  }
+});
+
+// Clicking injects a large activation spike directly into the nearest node to the
+// click ray — bypasses the edge network entirely, handy for triggering a wave by hand.
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+window.addEventListener('click', (e) => {
+  pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+
+  // Try a direct hit on the node mesh first...
+  const hit = raycaster.intersectObject(nodeMesh)[0];
+  let targetIndex = hit ? hit.instanceId : null;
+
+  // ...and if the click missed every sphere (they're small), fall back to
+  // whichever node's center passes closest to the click ray.
+  if (targetIndex === null || targetIndex === undefined) {
+    let bestDist = Infinity;
+    for (let i = 0; i < NODE_COUNT; i++) {
+      const d = raycaster.ray.distanceToPoint(nodePositions[i]);
+      if (d < bestDist) { bestDist = d; targetIndex = i; }
+    }
+    if (bestDist > currentNodeSize * 8) targetIndex = null; // click was nowhere near the graph
+  }
+
+  if (targetIndex !== null && targetIndex !== undefined) {
+    activation[targetIndex] += CLICK_STRENGTH;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Control panel: binds each slider straight to its matching `let` constant
+// above, plus transport buttons and the auto-rotate checkbox.
+// ---------------------------------------------------------------------------
+let paused = false; // Pause freezes updateSignals/updateNodes; rendering + OrbitControls keep running
+
+// Wires a <input type=range> to a getter/setter pair and its value readout span
+function bindSlider(inputId, valueId, get, set, decimals) {
+  const input = document.getElementById(inputId);
+  const valueEl = document.getElementById(valueId);
+  input.value = get();
+  valueEl.textContent = get().toFixed(decimals);
+  input.addEventListener('input', () => {
+    const v = parseFloat(input.value);
+    set(v);
+    valueEl.textContent = v.toFixed(decimals);
+  });
+}
+
+bindSlider('slider-speed', 'val-speed', () => SIGNAL_SPEED, (v) => { SIGNAL_SPEED = v; }, 2);
+bindSlider('slider-strength', 'val-strength', () => SIGNAL_STRENGTH, (v) => { SIGNAL_STRENGTH = v; }, 2);
+bindSlider('slider-decay', 'val-decay', () => DECAY_RATE, (v) => { DECAY_RATE = v; }, 2);
+bindSlider('slider-refractory', 'val-refractory', () => REFRACTORY_TIME, (v) => { REFRACTORY_TIME = v; }, 2);
+// Threshold needs the extra step of re-applying to every node's stored threshold
+bindSlider('slider-threshold', 'val-threshold', () => BASE_THRESHOLD, (v) => {
+  BASE_THRESHOLD = v;
+  applyBaseThreshold();
+}, 2);
+
+// Clears activation/refractory/flash state and any in-transit signals, then
+// immediately repaints every node back to its dim resting color.
+function resetSimulation() {
+  activation.fill(0);
+  refractoryTimer.fill(0);
+  fireFlashRemaining.fill(0);
+  activeSignals = [];
+  signalMesh.count = 0;
+  fireTimestamps.length = 0;
+  scheduledBurstFlashes.length = 0;
+
+  // Any node mid-flash has a swollen scale (see updateNodes' scale-pop pass) —
+  // shrink those back to normal before dropping them from tracking.
+  for (const i of flashingNodes) {
+    dummy.position.copy(nodePositions[i]);
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    nodeMesh.setMatrixAt(i, dummy.matrix);
+  }
+  flashingNodes.clear();
+  nodeMesh.instanceMatrix.needsUpdate = true;
+
+  for (let i = 0; i < NODE_COUNT; i++) {
+    color.copy(nodeBaseColors[i]).multiplyScalar(NODE_RESTING_BRIGHTNESS); // ratio=0 resting brightness, see updateNodes
+    nodeMesh.setColorAt(i, color);
+  }
+  nodeMesh.instanceColor.needsUpdate = true;
+}
+
+const btnPause = document.getElementById('btn-pause');
+btnPause.addEventListener('click', () => {
+  paused = !paused;
+  btnPause.textContent = paused ? 'Resume' : 'Pause';
+});
+document.getElementById('btn-reset').addEventListener('click', resetSimulation);
+document.getElementById('btn-burst').addEventListener('click', injectRandomSignal);
+
+const chkAutoRotate = document.getElementById('chk-autorotate');
+chkAutoRotate.checked = controls.autoRotate;
+chkAutoRotate.addEventListener('change', () => { controls.autoRotate = chkAutoRotate.checked; });
+
+// Plasticity controls
+bindSlider('slider-learnrate', 'val-learnrate', () => LEARN_RATE, (v) => { LEARN_RATE = v; }, 3);
+bindSlider('slider-decaypersec', 'val-decaypersec', () => DECAY_PER_SEC, (v) => { DECAY_PER_SEC = v; }, 3);
+
+const chkPlasticity = document.getElementById('chk-plasticity');
+chkPlasticity.checked = plasticityEnabled;
+chkPlasticity.addEventListener('change', () => { plasticityEnabled = chkPlasticity.checked; });
+
+// --- Node count slider: rebuilds the whole graph (only on release, not while dragging) ---
+const sliderNodeCount = document.getElementById('slider-nodecount');
+const valNodeCount = document.getElementById('val-nodecount');
+const rebuildIndicator = document.getElementById('rebuild-indicator');
+sliderNodeCount.value = NODE_COUNT;
+valNodeCount.textContent = NODE_COUNT;
+sliderNodeCount.addEventListener('input', () => {
+  valNodeCount.textContent = sliderNodeCount.value; // live label only; rebuild happens on release
+});
+sliderNodeCount.addEventListener('change', () => {
+  const n = parseInt(sliderNodeCount.value, 10);
+  rebuildIndicator.style.display = 'block';
+  // Two rAFs guarantee the browser actually paints the "Rebuilding…" message
+  // before the (synchronous, potentially heavy) rebuild blocks the main thread.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    rebuildEverything(n);
+    rebuildIndicator.style.display = 'none';
+  }));
+});
+
+// --- Cinematic mode: hides both overlay panels and forces auto-rotate on, for
+// clean screen-recording. Toggle via the button or the "C" key (the key still
+// works once the panel — and its own button — are hidden). ---
+let cinematicMode = false;
+const controlsPanelEl = document.getElementById('controls-panel');
+const statsPanelEl = document.getElementById('stats-panel');
+const btnCinematic = document.getElementById('btn-cinematic');
+
+function setCinematicMode(on) {
+  cinematicMode = on;
+  controlsPanelEl.classList.toggle('hidden', on);
+  statsPanelEl.classList.toggle('hidden', on);
+  if (on) {
+    controls.autoRotate = true;
+    chkAutoRotate.checked = true;
+  }
+  btnCinematic.textContent = on ? 'Exit Cinematic (C)' : 'Cinematic Mode (C)';
+}
+btnCinematic.addEventListener('click', () => setCinematicMode(!cinematicMode));
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyC') setCinematicMode(!cinematicMode);
+});
+
+// ---------------------------------------------------------------------------
+// Stats overlay: firing rate (fires/sec, ~1s trailing window), active signal
+// count, and count of nodes charged above 10% of their own threshold.
+// Refreshed 4x/second so the numbers read cleanly instead of flickering.
+// ---------------------------------------------------------------------------
+let fireTimestamps = [];   // elapsed-time stamp of every fire event in roughly the last second
+let statsTimer = 0;
+const STATS_INTERVAL = 0.25;
+
+const statFiringEl = document.getElementById('stat-firing');
+const statSignalsEl = document.getElementById('stat-signals');
+const statNodesEl = document.getElementById('stat-nodes');
+
+function updateStatsDisplay(now) {
+  while (fireTimestamps.length > 0 && fireTimestamps[0] < now - 1.0) {
+    fireTimestamps.shift();
+  }
+
+  let activeNodeCount = 0;
+  for (let i = 0; i < NODE_COUNT; i++) {
+    if (activation[i] > 0.1 * threshold[i]) activeNodeCount++;
+  }
+
+  statFiringEl.textContent = fireTimestamps.length;
+  statSignalsEl.textContent = activeSignals.length;
+  statNodesEl.textContent = activeNodeCount;
+}
+
+// Runs a full graph rebuild plus the bits of simulation state that live outside
+// buildGraph() (stats bookkeeping) — used for both the initial build and any
+// later "Node count" slider change.
+function rebuildEverything(count) {
+  buildGraph(count);
+  fireTimestamps.length = 0;
+  statsTimer = 0;
+  autoBurstTimer = 0;
+  dramaticBurstTimer = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Resize handling
+// ---------------------------------------------------------------------------
+window.addEventListener('resize', () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloomPass.resolution.set(w, h);
+});
+
+// ---------------------------------------------------------------------------
+// Cinematic camera drift: a very subtle, fully deterministic sway + breathing
+// dolly applied AFTER OrbitControls has positioned the camera each frame. It
+// never touches controls.target or the controls' internal spherical state, so
+// it can't fight or accumulate against manual drag/zoom/pan — every frame it's
+// just "wherever OrbitControls put the camera" plus a tiny sinusoidal nudge.
+// ---------------------------------------------------------------------------
+const BREATHE_AMPLITUDE = 0.5;  // world units of extra dolly in/out
+const BREATHE_SPEED = 0.15;
+const SWAY_AMPLITUDE = 0.5;     // lateral/vertical drift, in the same small units
+const SWAY_SPEED = 0.11;
+
+const driftDir = new THREE.Vector3();
+const driftRight = new THREE.Vector3();
+function applyCinematicDrift(now) {
+  camera.getWorldDirection(driftDir);
+  const breathe = Math.sin(now * BREATHE_SPEED) * BREATHE_AMPLITUDE;
+  camera.position.addScaledVector(driftDir, breathe);
+
+  driftRight.crossVectors(driftDir, camera.up).normalize();
+  camera.position.addScaledVector(driftRight, Math.sin(now * SWAY_SPEED) * SWAY_AMPLITUDE);
+  camera.position.y += Math.cos(now * SWAY_SPEED * 0.7) * SWAY_AMPLITUDE * 0.6;
+}
+
+// ---------------------------------------------------------------------------
+// Keep-alive injectors: the network should never look idle. A small random
+// burst every 1-2s keeps some traffic on the wire even if natural cascades
+// happen to die out, and a much larger single-node spike every ~4s reads as a
+// deliberate wave sweeping outward from one point across the whole graph.
+// ---------------------------------------------------------------------------
+let autoBurstTimer = 0;
+let nextAutoBurstInterval = 1 + Math.random(); // re-rolled each time, 1-2s
+const DRAMATIC_BURST_INTERVAL = 4.0;
+let dramaticBurstTimer = 0;
+
+// ---------------------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------------------
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  const now = clock.elapsedTime;
+
+  if (!paused) {
+    autoBurstTimer += dt;
+    if (autoBurstTimer >= nextAutoBurstInterval) {
+      autoBurstTimer = 0;
+      nextAutoBurstInterval = 1 + Math.random();
+      injectRandomSignal();
+    }
+
+    dramaticBurstTimer += dt;
+    if (dramaticBurstTimer >= DRAMATIC_BURST_INTERVAL) {
+      // Throttle: only fire once the network's actually calmed back down.
+      // Without this, repeated bursts stack their leftover activity on top of
+      // each other every cycle and slowly creep toward permanent full-network
+      // saturation over a minute or two (confirmed via a 60s soak test) even
+      // though each individual burst looks fine in isolation. If it's still
+      // busy, just keep waiting — the timer isn't reset, so it fires the
+      // moment things quiet down instead of only on the next 4s tick.
+      if (activeSignals.length < MAX_ACTIVE_SIGNALS * 0.12) {
+        dramaticBurstTimer = 0;
+        injectDramaticBurst(now);
+      }
+    }
+
+    processScheduledBurstFlashes(now);
+    updateSignals(dt, now);
+    updateNodes(dt, now);
+    updateEdgeWeights(dt);
+  }
+
+  statsTimer += dt;
+  if (statsTimer >= STATS_INTERVAL) {
+    statsTimer -= STATS_INTERVAL;
+    updateStatsDisplay(now);
+  }
+
+  controls.update();       // needed for damping + autoRotate
+  applyCinematicDrift(now); // subtle idle sway/breathing on top of OrbitControls
+  composer.render();
+}
+
+rebuildEverything(NODE_COUNT); // initial graph build
+animate();
+</script>
+</body>
+</html>

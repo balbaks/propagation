@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="Propagation — An interactive 3D neural signal network built with Three.js" />
+  <meta name="theme-color" content="#0a0e14" />
+  <title>Propagation — Neural Network Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #05080f;
+      color: #e6f0ff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(ellipse at 50% 40%, rgba(58,123,255,0.06) 0%, transparent 60%),
+                  radial-gradient(ellipse at 30% 70%, rgba(155,89,255,0.04) 0%, transparent 50%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 800px;
+      width: 92%;
+      text-align: center;
+      padding: 48px 28px;
+    }
+    h1 {
+      font-size: clamp(38px, 7vw, 60px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 10px;
+      background: linear-gradient(135deg, #4a8fff 0%, #a56eff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .lead {
+      font-size: clamp(15px, 2.2vw, 18px);
+      color: #7a8fab;
+      margin-bottom: 36px;
+      line-height: 1.6;
+      max-width: 520px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .screenshot-wrap {
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 50px rgba(58,123,255,0.12), 0 1px 3px rgba(0,0,0,0.6);
+      margin-bottom: 36px;
+      border: 1px solid rgba(255,255,255,0.06);
+      position: relative;
+    }
+    .screenshot-wrap img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .play-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.25);
+      transition: background 0.25s;
+    }
+    .screenshot-wrap:hover .play-overlay {
+      background: rgba(0,0,0,0.45);
+    }
+    .play-icon {
+      width: 68px;
+      height: 68px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.12);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px solid rgba(255,255,255,0.2);
+      transition: transform 0.2s, background 0.2s;
+    }
+    .screenshot-wrap:hover .play-icon {
+      transform: scale(1.08);
+      background: rgba(255,255,255,0.18);
+    }
+    .play-icon::after {
+      content: '';
+      width: 0;
+      height: 0;
+      border-style: solid;
+      border-width: 16px 0 16px 28px;
+      border-color: transparent transparent transparent #fff;
+      margin-left: 5px;
+    }
+    .buttons {
+      display: flex;
+      gap: 14px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-block;
+      padding: 13px 26px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 15px;
+      text-decoration: none;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-primary {
+      background: linear-gradient(135deg, #3a7bff, #9b59ff);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(58,123,255,0.3);
+    }
+    .btn-primary:hover { box-shadow: 0 6px 24px rgba(58,123,255,0.45); }
+    .btn-secondary {
+      background: rgba(255,255,255,0.05);
+      color: #bcd;
+      border: 1px solid rgba(255,255,255,0.12);
+    }
+    .btn-secondary:hover { background: rgba(255,255,255,0.08); }
+    .features {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 40px;
+      font-size: 13px;
+      color: #5a7188;
+    }
+    .features span {
+      background: rgba(255,255,255,0.03);
+      padding: 6px 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Propagation</h1>
+    <p class="lead">Interactive 3D neural network — watch thousands of nodes fire cascading signals in real time.</p>
+
+    <a href="propagation.html" style="text-decoration:none;color:inherit;">
+      <div class="screenshot-wrap">
+        <img src="assets/screenshot.svg" alt="Propagation demo screenshot" />
+        <div class="play-overlay">
+          <div class="play-icon"></div>
+        </div>
+      </div>
+    </a>
+
+    <div class="buttons">
+      <a href="propagation.html" class="btn btn-primary">Launch Demo</a>
+      <a href="https://github.com/balbaks/propagation" class="btn btn-secondary">View on GitHub</a>
+    </div>
+
+    <div class="features">
+      <span>3000+ Nodes</span>
+      <span>Hebbian Plasticity</span>
+      <span>Bloom Effects</span>
+      <span>Live Controls</span>
+      <span>Single File</span>
+    </div>
+  </div>
+</body>
+</html>
