@@ -19,7 +19,8 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p out
-          cp -r propagation.html LICENSE README.md assets index.html out/
+          cp propagation.html index.html README.md LICENSE CONTRIBUTING.md .nojekyll out/
+          cp -r assets out/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v2
